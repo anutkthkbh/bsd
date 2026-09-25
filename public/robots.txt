@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /merchant
+Disallow: /admin
+Disallow: /login

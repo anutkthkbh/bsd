@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS login_attempts (
+  email TEXT PRIMARY KEY COLLATE NOCASE,
+  count INTEGER NOT NULL,
+  reset_at TEXT NOT NULL
+);
