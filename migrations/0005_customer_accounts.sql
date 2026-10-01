@@ -2,6 +2,7 @@ PRAGMA foreign_keys = OFF;
 
 ALTER TABLE sessions RENAME TO sessions_legacy;
 ALTER TABLE users RENAME TO users_legacy;
+DROP INDEX IF EXISTS idx_sessions_expiry;
 
 CREATE TABLE users (
   id TEXT PRIMARY KEY,
@@ -30,10 +31,10 @@ CREATE TABLE sessions (
 );
 INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at)
 SELECT id,user_id,token_hash,expires_at,created_at FROM sessions_legacy;
-CREATE INDEX idx_sessions_expiry ON sessions(expires_at);
 
 DROP TABLE sessions_legacy;
 DROP TABLE users_legacy;
+CREATE INDEX idx_sessions_expiry ON sessions(expires_at);
 
 CREATE TABLE customer_profiles (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
