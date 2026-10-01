@@ -1,13 +1,13 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { api, ils, send, type Account, type CustomerAccountData } from './api'
+import { api, ils, send, type Account, type CustomerAccountData, type Notification, type NotificationsData } from './api'
 
 const Arrow = () => <span aria-hidden="true">←</span>
 const storeStatus:Record<string,string>={new:'חדשה',contacted:'נוצר קשר',closed:'נסגרה'}
 const requestStatus:Record<string,string>={open:'פעילה',closed:'נסגרה'}
 
-function Panel({title,children}:{title:string;children:ReactNode}) {
-  return <section className="panel"><div className="panel-heading"><h2>{title}</h2></div>{children}</section>
+function Panel({title,children,action}:{title:string;children:ReactNode;action?:ReactNode}) {
+  return <section className="panel"><div className="panel-heading"><h2>{title}</h2>{action}</div>{children}</section>
 }
 
 function Empty({text}:{text:string}) {
@@ -26,6 +26,7 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
   onUserChange:(user:Account)=>void
 }) {
   const [data,setData]=useState<CustomerAccountData|null>(null)
+  const [notifications,setNotifications]=useState<NotificationsData>({notifications:[],unread:0})
   const [form,setForm]=useState({name:user?.name||'',phone:''})
   const [errorText,setError]=useState('')
   const [notice,setNotice]=useState('')
@@ -35,10 +36,14 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
     if(user?.role!=='customer') return
     let cancelled=false
     setError('')
-    api<CustomerAccountData>('/account').then(next=>{
+    Promise.all([
+      api<CustomerAccountData>('/account'),
+      api<NotificationsData>('/notifications'),
+    ]).then(([nextAccount,nextNotifications])=>{
       if(cancelled) return
-      setData(next)
-      setForm({name:next.user.name,phone:next.profile?.phone||''})
+      setData(nextAccount)
+      setNotifications(nextNotifications)
+      setForm({name:nextAccount.user.name,phone:nextAccount.profile?.phone||''})
     }).catch(error=>{if(!cancelled)setError(error.message)})
     return()=>{cancelled=true}
   },[user?.id,user?.role])
@@ -61,6 +66,31 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
     } finally { setBusy(false) }
   }
 
+  async function markRead(notification:Notification) {
+    if(notification.read_at) return
+    try {
+      await send(`/notifications/${notification.id}`,'PATCH')
+      const readAt=new Date().toISOString()
+      setNotifications(current=>({
+        unread:Math.max(0,current.unread-1),
+        notifications:current.notifications.map(item=>item.id===notification.id?{...item,read_at:readAt}:item),
+      }))
+    } catch(error) {
+      setError((error as Error).message)
+    }
+  }
+
+  async function markAllRead() {
+    if(!notifications.unread) return
+    try {
+      await send('/notifications/read-all','PATCH')
+      const readAt=new Date().toISOString()
+      setNotifications(current=>({unread:0,notifications:current.notifications.map(item=>({...item,read_at:item.read_at||readAt}))}))
+    } catch(error) {
+      setError((error as Error).message)
+    }
+  }
+
   const requests=data?.requests||[]
   const requestedTotal=requests.reduce((sum,request)=>sum+request.total_agorot,0)
   const storeRequests=requests.reduce((sum,request)=>sum+request.stores.length,0)
@@ -73,7 +103,7 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
     <div className="metrics">
       <div className="metric"><small>בקשות רכישה</small><strong>{requests.length}</strong></div>
       <div className="metric"><small>חנויות שטיפלו בבקשות</small><strong>{storeRequests}</strong></div>
-      <div className="metric"><small>שווי מוצרים בבקשות</small><strong>{ils(requestedTotal)}</strong></div>
+      <div className="metric"><small>התראות חדשות</small><strong>{notifications.unread}</strong></div>
     </div>
 
     <div className="dashboard-grid">
@@ -91,6 +121,13 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
         <p className="muted">שליחת קוד אימות וכניסה באמצעות Google יופעלו לאחר חיבור ספקי האימות וה־Secrets.</p>
       </Panel>
     </div>
+
+    <Panel title={`התראות${notifications.unread?` · ${notifications.unread} חדשות`:''}`} action={notifications.unread?<button type="button" className="text-button" onClick={markAllRead}>סימון הכול כנקרא</button>:undefined}>
+      {notifications.notifications.length?<div className="list">{notifications.notifications.map(notification=><div className="list-row" key={notification.id}>
+        <div><strong>{notification.title}{!notification.read_at?' · חדש':''}</strong><small>{notification.message} · {formatDate(notification.created_at)}</small></div>
+        <div className="row-actions">{notification.target_url?.startsWith('/')&&<Link to={notification.target_url} onClick={()=>markRead(notification)}>פתיחה</Link>}{!notification.read_at&&<button type="button" onClick={()=>markRead(notification)}>סימון כנקראה</button>}</div>
+      </div>)}</div>:<Empty text="אין כרגע התראות חדשות בחשבון."/>}
+    </Panel>
 
     <Panel title="היסטוריית בקשות רכישה">
       {requests.length?<div className="request-list">{requests.map(request=><article className="request-card" key={request.id}>
