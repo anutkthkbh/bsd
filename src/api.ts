@@ -7,8 +7,18 @@ export interface Product {
   store_name?: string; store_slug?: string; selected_variant?: string
 }
 export interface Account { id:string; email:string; name:string; role:'admin'|'merchant'|'customer'; store_id:string|null }
-export interface CustomerProfile { phone:string; email_verified:number; phone_verified:number }
-export interface CustomerAccountData { user:Account; profile:CustomerProfile|null }
+export interface CustomerProfile { phone:string; email_verified:number; phone_verified:number; updated_at?:string }
+export interface CustomerRequestItem {
+  store_request_id:string; product_id:string; product_name:string; variant:string; quantity:number; unit_price_agorot:number
+}
+export interface CustomerStoreRequest {
+  id:string; request_id:string; store_id:string; store_name:string; status:'new'|'contacted'|'closed'
+  subtotal_agorot:number; created_at:string; items:CustomerRequestItem[]
+}
+export interface CustomerPurchaseRequest {
+  id:string; status:'open'|'closed'; total_agorot:number; created_at:string; stores:CustomerStoreRequest[]
+}
+export interface CustomerAccountData { user:Account; profile:CustomerProfile|null; requests:CustomerPurchaseRequest[] }
 export interface Order { id:string; customer_name:string; total_agorot:number; payment_status:string; fulfillment_status:string; created_at:string }
 export interface Entry { id:string; kind:string; amount_agorot:number; order_id:string|null; created_at:string }
 export interface PurchaseRequest {
