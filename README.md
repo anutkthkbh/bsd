@@ -10,6 +10,7 @@
 - סוחר עורך פרופיל עסק, יוצר ועורך מוצרים, מעביר מוצר לארכיון, רואה הזמנות ותנועות כספיות, ומקדם סטטוס הזמנה ששולמה.
 - מסד D1 כולל טבלאות נפרדות לחנויות, מוצרים, הזמנות, חשבונות ספקים, Ledger בלתי משתנה, בקשות זיכוי ורישום פעולות.
 - סל שנשמר בדפדפן, הצעת מחיר שנבדקת מחדש בשרת, בקשת רכישה ללא חיוב עם חלוקה לחנויות, וצפייה וטיפול בבקשות רק בחנות המתאימה.
+- סוחרים יכולים להעלות תמונות מוצר JPG/PNG/WebP עד 5MB ל־R2 כשמוגדר bucket binding בשם `MEDIA`; כתובת תמונה חיצונית מאובטחת עדיין נתמכת.
 - חיפוש נתונים רגישים מוגבל לפי המשתמש והחנות בשרת. אין מפתחות או נתוני לקוחות מהארכיון בגיט.
 
 **טרם מחובר:** ספק סליקה Marketplace, ספק חשבוניות, SMS/מייל, אימות Google, הרשמת לקוחות, הפקת הזמנות ששולמו ותהליך זיכוי. בקשות רכישה אינן מחייבות ואינן שומרות מלאי; נקודת ה־API של checkout עדיין מחזירה 503 ואינה יוצרת הזמנה או חיוב. חשבון תשלום/חשבוניות ב־CRM מציג מצב חיבור בלבד. [תוכנית חיבור הסליקה](PAYMENT_INTEGRATION.md) מפרטת את הממשק שיידרש כשייבחר ספק. אין להציג את המערכת כמערכת מסחר עם תשלום פעיל לפני חיבור ספקים ובדיקת הקצה לקצה.
@@ -32,7 +33,7 @@ npm run build
 
 1. צרו מאגר GitHub לפרויקט זה וחברו אותו ל־Cloudflare Pages. בחרו ענף זה כ־**Production branch** אם תרצו שכל commit לענף יגיע לאתר הראשי; אחרת הוא יהיה Preview branch.
 2. הגדרות build ב־Pages: **Framework: React (Vite)**, **Root directory:** `/`, **Build command:** `npm run build`, **Build output directory:** `dist`, ומשתנה סביבה `NODE_VERSION=22`.
-3. צרו מסד D1 בשם `madarom` ב־Cloudflare. ב־Pages > Settings > Bindings הוסיפו **D1 database binding** בשם המדויק `DB`. חברו מסדים נפרדים ל־Preview ול־Production כדי שלא יחלוקו נתונים.
+3. צרו מסד D1 בשם `madarom` ב־Cloudflare. ב־Pages > Settings > Bindings הוסיפו **D1 database binding** בשם המדויק `DB`. חברו מסדים נפרדים ל־Preview ול־Production כדי שלא יחלוקו נתונים. להעלאת תמונות דרך המערכת, צרו bucket ב־R2 והוסיפו **R2 bucket binding** בשם `MEDIA` לכל סביבה; לאחר שינוי binding יש לפרוס מחדש. בהיעדר R2 ניתן להזין URL חיצוני מאובטח.
 4. העתיקו את `wrangler.example.jsonc` אל `wrangler.jsonc`, החליפו בו את `database_id` במזהה המסד שנוצר. הקובץ המקומי מוחרג מגיט. הפעילו את קובצי `migrations/` לפי סדרם על כל מסד, לאחר הזדהות ב־Wrangler:
 
 ```bash
@@ -65,6 +66,7 @@ npx wrangler d1 execute madarom --remote --file=admin-seed.sql
 - `functions/api/[[path]].ts`: API של Cloudflare Pages.
 - `functions/_lib/`: אימות, בדיקת קלט והרשאות.
 - `migrations/`: סכמת D1.
+- `functions/_lib/media.ts`: העלאה וקריאה מאובטחות של תמונות דרך R2.
 - `scripts/create-admin.mjs`: יצירת חשבון מנהל ראשון ללא סיסמה בקוד.
 
 ## מחקר ויישום

@@ -25,6 +25,6 @@
 
 ## Cloudflare Pages
 
-פריסה מגיטאב: `main`, פקודת בנייה `npm run build`, תיקיית פלט `dist`, `NODE_VERSION=22`. להגדיר D1 binding בשם המדויק `DB` בהגדרות הפרויקט גם לסביבת production; רצוי מסד נפרד ל־preview. להריץ מיגרציות 0001–0004 לפי הסדר על המסד הנכון. רק אחר כך ליצור מנהל בהליך שב־README. בדקו `/api/health`, `/api/catalog`, שליחת בקשת ניסיון והופעתה אצל הסוחר לפני שימוש ציבורי. אם הפרויקט עדיין לא מחובר ל־GitHub ב־Cloudflare, יש לחבר את המאגר `anutkthkbh/bsd` לפרויקט Pages קודם.
+פריסה מגיטאב: `main`, פקודת בנייה `npm run build`, תיקיית פלט `dist`, `NODE_VERSION=22`. להגדיר D1 binding בשם המדויק `DB` בהגדרות הפרויקט גם לסביבת production; רצוי מסד נפרד ל־preview. לתמונות מוצרים מתוך המערכת יש ליצור R2 bucket ולחבר binding בשם `MEDIA`; זו יכולת אופציונלית וללא binding תוצג הודעה ברורה. להריץ מיגרציות 0001–0004 לפי הסדר על המסד הנכון. רק אחר כך ליצור מנהל בהליך שב־README. בדקו `/api/health` עם `purchase_requests_ready:true`, `/api/catalog`, העלאת תמונה, שליחת בקשת ניסיון והופעתה אצל הסוחר לפני שימוש ציבורי. אם הפרויקט עדיין לא מחובר ל־GitHub ב־Cloudflare, יש לחבר את המאגר `anutkthkbh/bsd` לפרויקט Pages קודם.
 
 ראו גם את תיעוד [Cloudflare Pages Git integration](https://developers.cloudflare.com/pages/get-started/git-integration/), [D1 binding](https://developers.cloudflare.com/pages/functions/bindings/) ו־[D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/).

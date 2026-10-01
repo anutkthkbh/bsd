@@ -116,3 +116,37 @@ test('purchase requests reprice server-side, split by store, isolate contact det
   assert.equal((await call(`/merchant/requests/${two[0].id}`,{method:'PATCH',cookie:merchantOne.cookie,body:{status:'contacted'}})).status,404)
   assert.equal((await call(`/merchant/requests/${one[0].id}`,{method:'PATCH',cookie:merchantOne.cookie,body:{status:'contacted'}})).status,200)
 })
+
+test('merchant image upload validates bytes, tenant ownership and public media read',async()=>{
+  const merchant=await call('/login',{method:'POST',body:{email:'one@example.com',password:'merchant-passphrase-1'}})
+  const objects=new Map()
+  const MEDIA={
+    async put(key,bytes){objects.set(key,bytes)},
+    async get(key){const bytes=objects.get(key);return bytes?{body:new ReadableStream({start(controller){controller.enqueue(bytes);controller.close()}})}:null},
+  }
+  const invoke=(path,request)=>onRequest({request,env:{DB,MEDIA},params:{path:path.slice(1).split('/')}})
+  const image=new Uint8Array([0xff,0xd8,0xff,0xe0,0x00,0x01])
+  const uploadPath='/merchant/media'
+  const upload=await invoke(uploadPath,new Request('https://madarom.example/api'+uploadPath,{
+    method:'POST',headers:{Cookie:merchant.cookie,'content-type':'image/jpeg'},body:image,
+  }))
+  assert.equal(upload.status,201)
+  const {url}=await upload.json()
+  assert.match(url,/^\/api\/media\/[\w-]+\/[0-9a-f-]+\.jpg$/)
+  const mediaPath=url.replace('/api','')
+  const retrieved=await invoke(mediaPath,new Request('https://madarom.example'+url))
+  assert.equal(retrieved.headers.get('content-type'),'image/jpeg')
+  assert.deepEqual(new Uint8Array(await retrieved.arrayBuffer()),image)
+  const product=sql.prepare('SELECT id,store_id FROM products LIMIT 1').get()
+  const own=await call('/merchant/products/'+product.id,{method:'PATCH',cookie:merchant.cookie,
+    body:{name:'ספל',category:'בית',price_agorot:3000,stock:4,variants:[],status:'active',image_url:url}})
+  assert.equal(own.status,200)
+  const other=await call('/login',{method:'POST',body:{email:'two@example.com',password:'merchant-passphrase-2'}})
+  const cross=await call('/merchant/products',{method:'POST',cookie:other.cookie,
+    body:{name:'ספל',category:'בית',price_agorot:3000,stock:4,variants:[],status:'active',image_url:url}})
+  assert.equal(cross.status,400)
+  const invalid=await invoke(uploadPath,new Request('https://madarom.example/api'+uploadPath,{
+    method:'POST',headers:{Cookie:merchant.cookie,'content-type':'image/jpeg'},body:new Uint8Array([60,115,118,103,62]),
+  }))
+  assert.equal(invalid.status,400)
+})

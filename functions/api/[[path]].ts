@@ -1,6 +1,7 @@
 import type { Context, Database, User } from '../_lib/types'
 import { body, error, getUser, json, money, passwordHash, randomId, randomToken, safeText, sameOrigin, sha256, slug, validUrl, verifyPassword } from '../_lib/security'
 import { merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
+import { getMedia, uploadMedia } from '../_lib/media'
 
 type Row = Record<string, unknown>
 const values = <T>(query: Promise<{results:T[]}>) => query.then(result => result.results)
@@ -72,7 +73,10 @@ async function saveProduct(request: Request, db: Database, user: User, id?: stri
   const data = await body(request)
   const name = safeText(data.name, 120), category = safeText(data.category, 70)
   const price = money(data.price_agorot), stock = money(data.stock), variants = parseVariants(data.variants ?? [])
-  const description = safeText(data.description, 3000), image = validUrl(data.image_url)
+  const description = safeText(data.description, 3000)
+  const uploadedImage=safeText(data.image_url,160)
+  const image=/^\/api\/media\/([\w-]+)\/[0-9a-f-]{36}\.(jpg|png|webp)$/.exec(uploadedImage)?.[1]===user.store_id
+    ? uploadedImage : validUrl(data.image_url)
   const status = data.status === 'active' ? 'active' : 'draft'
   if (!name || !category || price === null || stock === null || stock > 100000 || variants === null) return error('יש לבדוק שם, קטגוריה, מחיר, מלאי ואפשרויות')
   if (data.image_url && !image) return error('קישור התמונה חייב להתחיל ב־https')
@@ -172,6 +176,7 @@ export async function onRequest(context: Context): Promise<Response> {
   try {
     if (path === '/health' && method === 'GET') { await db.prepare('SELECT 1').first(); return json({ok:true,purchase_requests_ready:await requestsReady(db)}) }
     if (path === '/catalog' && method === 'GET') return catalog(db)
+    if (path.startsWith('/media/') && method === 'GET') return await getMedia(context.env.MEDIA,path.slice('/media/'.length))
     if ((path === '/checkout/quote' || path === '/purchase-requests') && !await requestsReady(db))
       return error('בקשות רכישה יופעלו לאחר עדכון מסד הנתונים',503)
     if (path === '/checkout/quote' && method === 'POST') return await quoteRequest(request,db)
@@ -189,6 +194,7 @@ export async function onRequest(context: Context): Promise<Response> {
     if (path.startsWith('/merchant/')) {
       if (user.role !== 'merchant' || !user.store_id) return forbidden()
       if (path === '/merchant/overview' && method === 'GET') return merchantOverview(db,user)
+      if (path === '/merchant/media' && method === 'POST') return await uploadMedia(request,context.env.MEDIA,user.store_id)
       const requestId = /^\/merchant\/requests\/([\w-]+)$/.exec(path)?.[1]
       if (requestId && method === 'PATCH') return await updateMerchantRequest(request,db,user.store_id,requestId)
       if (path === '/merchant/profile' && method === 'PATCH') return profile(request,db,user)

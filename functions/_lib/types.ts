@@ -9,7 +9,11 @@ export interface Database {
   prepare(query: string): Statement
   batch(statements: Statement[]): Promise<unknown[]>
 }
-export interface Env { DB?: Database }
+export interface MediaBucket {
+  put(key:string,value:ArrayBuffer | Uint8Array,options?:{httpMetadata?:{contentType:string}}):Promise<unknown>
+  get(key:string):Promise<{body:ReadableStream;httpEtag?:string}|null>
+}
+export interface Env { DB?: Database; MEDIA?: MediaBucket }
 export interface Context {
   request: Request
   env: Env
