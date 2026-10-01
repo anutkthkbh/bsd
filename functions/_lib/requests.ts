@@ -1,5 +1,6 @@
 import type { Database, Statement, User } from './types'
 import { body, error, getUser, json, money, randomId, safeText, sha256 } from './security'
+import { userNotificationStatement } from './notifications'
 
 type ProductRow = {
   id:string; name:string; store_id:string; store_name:string; price_agorot:number
@@ -7,6 +8,7 @@ type ProductRow = {
 }
 type Line = {product_id:string; name:string; store_id:string; store_name:string; variant:string; quantity:number; unit_price_agorot:number; line_total_agorot:number}
 type CustomerProfile = { phone:string }
+type RequestOwner = {request_id:string;user_id:string|null;store_name:string}
 
 export class RequestError extends Error {
   constructor(message:string, public status=400) { super(message) }
@@ -103,10 +105,19 @@ export async function submitRequest(request:Request,db:Database,user?:User|null)
   const statements:Statement[]=[db.prepare(`INSERT INTO purchase_requests
     (id,idempotency_key,request_hash,customer_name,customer_email,customer_phone,total_agorot,user_id)
     VALUES (?,?,?,?,?,?,?,?)`).bind(id,key,request_hash,customer_name,customer_email,customer_phone,basket.total_agorot,authenticatedCustomer?.id||null)]
-  if (authenticatedCustomer) statements.push(
-    db.prepare('UPDATE customer_profiles SET phone=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?')
-      .bind(customer_phone,authenticatedCustomer.id)
-  )
+  if (authenticatedCustomer) {
+    statements.push(
+      db.prepare('UPDATE customer_profiles SET phone=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?')
+        .bind(customer_phone,authenticatedCustomer.id),
+      userNotificationStatement(db,authenticatedCustomer.id,{
+        type:'purchase_request.created',
+        title:'בקשת הרכישה נשלחה',
+        message:`הבקשה נשלחה ל־${basket.groups.length} ${basket.groups.length===1?'חנות':'חנויות'} ותופיע בהיסטוריה שלכם.`,
+        targetUrl:'/account',
+        dedupeKey:`purchase-request:${id}:customer`,
+      }),
+    )
+  }
   for (const group of basket.groups) {
     const storeRequestId=randomId()
     statements.push(db.prepare('INSERT INTO store_requests(id,request_id,store_id,subtotal_agorot) VALUES (?,?,?,?)')
@@ -114,6 +125,14 @@ export async function submitRequest(request:Request,db:Database,user?:User|null)
     for (const item of group.items) statements.push(db.prepare(`INSERT INTO request_items
       (id,store_request_id,product_id,product_name,variant,quantity,unit_price_agorot) VALUES (?,?,?,?,?,?,?)`)
       .bind(randomId(),storeRequestId,item.product_id,item.name,item.variant,item.quantity,item.unit_price_agorot))
+    const storeUsers=(await db.prepare('SELECT id FROM users WHERE store_id=?').bind(group.store_id).all<{id:string}>()).results
+    for (const storeUser of storeUsers) statements.push(userNotificationStatement(db,storeUser.id,{
+      type:'purchase_request.new',
+      title:'בקשת רכישה חדשה',
+      message:`התקבלה בקשה חדשה מ${customer_name} וממתינה לטיפול.`,
+      targetUrl:'/merchant',
+      dedupeKey:`purchase-request:${id}:store:${group.store_id}:${storeUser.id}`,
+    }))
   }
   try { await db.batch(statements) }
   catch (cause) {
@@ -159,8 +178,27 @@ export async function merchantRequests(db:Database,storeId:string) {
 export async function updateMerchantRequest(request:Request,db:Database,storeId:string,id:string) {
   const data=await body(request), status=safeText(data.status,20)
   if (!['contacted','closed'].includes(status)) return error('סטטוס לא תקין')
+  const owner=await db.prepare(`SELECT sr.request_id,pr.user_id,s.name AS store_name
+    FROM store_requests sr JOIN purchase_requests pr ON pr.id=sr.request_id
+    JOIN stores s ON s.id=sr.store_id WHERE sr.id=? AND sr.store_id=?`)
+    .bind(id,storeId).first<RequestOwner>()
+  if (!owner) return error('הבקשה אינה זמינה לעדכון',404)
   const result=await db.prepare(`UPDATE store_requests SET status=? WHERE id=? AND store_id=? AND status!='closed'`)
     .bind(status,id,storeId).run() as {meta?:{changes:number}}
   if (!result.meta?.changes) return error('הבקשה אינה זמינה לעדכון',404)
+  if (status==='closed') {
+    await db.prepare(`UPDATE purchase_requests SET status='closed' WHERE id=? AND NOT EXISTS (
+      SELECT 1 FROM store_requests WHERE request_id=? AND status!='closed'
+    )`).bind(owner.request_id,owner.request_id).run()
+  }
+  if (owner.user_id) {
+    await userNotificationStatement(db,owner.user_id,{
+      type:`purchase_request.${status}`,
+      title:status==='contacted'?'החנות מטפלת בבקשה':'הטיפול בחנות נסגר',
+      message:`${owner.store_name} עדכנה את מצב בקשת הרכישה שלכם.`,
+      targetUrl:'/account',
+      dedupeKey:`store-request:${id}:${status}`,
+    }).run()
+  }
   return json({ok:true})
 }
