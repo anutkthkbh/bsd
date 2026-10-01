@@ -23,6 +23,6 @@ export interface User {
   id: string
   email: string
   name: string
-  role: 'admin' | 'merchant'
+  role: 'admin' | 'merchant' | 'customer'
   store_id: string | null
 }

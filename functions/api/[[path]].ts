@@ -1,11 +1,13 @@
 import type { Context, Database, User } from '../_lib/types'
 import { body, error, getUser, json, money, passwordHash, randomId, randomToken, safeText, sameOrigin, sha256, slug, validUrl, verifyPassword } from '../_lib/security'
-import { merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
+import { customerRequests, merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
 import { getMedia, uploadMedia } from '../_lib/media'
+import { markAllNotificationsRead, markNotificationRead, notificationResponse } from '../_lib/notifications'
 
 type Row = Record<string, unknown>
 const values = <T>(query: Promise<{results:T[]}>) => query.then(result => result.results)
 const forbidden = () => error('אין הרשאה לבצע פעולה זו', 403)
+const validEmail = (value:string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 
 async function catalog(db: Database) {
   const [stores, products] = await Promise.all([
@@ -17,6 +19,45 @@ async function catalog(db: Database) {
   return json({ stores, products })
 }
 
+async function createSession(request:Request, db:Database, account:User) {
+  const token = randomToken()
+  await db.prepare("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES (?,?,?,datetime('now','+7 days'))")
+    .bind(randomId(),account.id,await sha256(token)).run()
+  const secure = new URL(request.url).protocol === 'https:' ? ' Secure;' : ''
+  return json({user:{id:account.id,email:account.email,name:account.name,role:account.role,store_id:account.store_id}},200,
+    {'set-cookie':`madarom_session=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=604800`})
+}
+
+async function registerCustomer(request:Request, db:Database) {
+  const data = await body(request)
+  const name = safeText(data.name,120)
+  const email = safeText(data.email,254).toLowerCase()
+  const phone = safeText(data.phone,35)
+  const password = typeof data.password === 'string' ? data.password : ''
+  if (name.length < 2 || !validEmail(email) || password.length < 12) {
+    return error('יש להזין שם, מייל תקין וסיסמה של 12 תווים לפחות')
+  }
+  if (phone && !/^[+0-9()\-\s]{7,35}$/.test(phone)) return error('מספר הטלפון אינו תקין')
+  const id = randomId(), salt = randomToken()
+  try {
+    await db.batch([
+      db.prepare("INSERT INTO users(id,email,name,role,store_id,password_salt,password_hash) VALUES (?,?,?,'customer',NULL,?,?)")
+        .bind(id,email,name,salt,await passwordHash(password,salt)),
+      db.prepare('INSERT INTO customer_profiles(user_id,phone) VALUES (?,?)').bind(id,phone),
+      db.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_subject) VALUES (?,?, 'password', ?)")
+        .bind(randomId(),id,email),
+      db.prepare('INSERT INTO audit_events(id,actor_id,action,target_id,detail_json) VALUES (?,?,?,?,?)')
+        .bind(randomId(),id,'customer.register',id,JSON.stringify({method:'password'})),
+    ])
+  } catch {
+    return error('כבר קיים חשבון עם כתובת המייל הזו',409)
+  }
+  const account:User = {id,email,name,role:'customer',store_id:null}
+  const response = await createSession(request,db,account)
+  const headers = new Headers(response.headers)
+  return new Response(response.body,{status:201,headers})
+}
+
 async function login(request: Request, db: Database) {
   const data = await body(request)
   const email = safeText(data.email, 254).toLowerCase()
@@ -24,7 +65,7 @@ async function login(request: Request, db: Database) {
   if (!email || !password) return error('יש להזין כתובת מייל וסיסמה')
   const attempts = await db.prepare('SELECT count,reset_at FROM login_attempts WHERE email=?').bind(email).first<{count:number,reset_at:string}>()
   const account = await db.prepare('SELECT * FROM users WHERE email=?').bind(email).first<User & {password_salt:string,password_hash:string}>()
-  const matches = account && await verifyPassword(password, account.password_salt, account.password_hash)
+  const matches = account && account.password_hash && await verifyPassword(password, account.password_salt, account.password_hash)
   if (!matches) {
     if (attempts && attempts.count >= 8 && attempts.reset_at > new Date().toISOString().replace('T',' ').slice(0,19)) return error('יותר מדי ניסיונות. אפשר לנסות שוב בעוד כמה דקות', 429)
     await db.prepare(`INSERT INTO login_attempts(email,count,reset_at) VALUES (?,1,datetime('now','+10 minutes'))
@@ -33,12 +74,31 @@ async function login(request: Request, db: Database) {
     return error('פרטי הכניסה אינם נכונים', 401)
   }
   await db.prepare('DELETE FROM login_attempts WHERE email=?').bind(email).run()
-  const token = randomToken()
-  await db.prepare("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES (?,?,?,datetime('now','+7 days'))")
-    .bind(randomId(),account.id,await sha256(token)).run()
-  const {id,name,role,store_id} = account
-  const secure = new URL(request.url).protocol === 'https:' ? ' Secure;' : ''
-  return json({user:{id,email,name,role,store_id}},200,{'set-cookie':`madarom_session=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=604800`})
+  return createSession(request,db,account)
+}
+
+async function customerAccount(db:Database,user:User) {
+  const [profile,requests] = await Promise.all([
+    db.prepare('SELECT phone,email_verified,phone_verified,updated_at FROM customer_profiles WHERE user_id=?').bind(user.id).first<Row>(),
+    customerRequests(db,user.id),
+  ])
+  return json({user,profile,requests})
+}
+
+async function updateCustomerAccount(request:Request,db:Database,user:User) {
+  const data=await body(request)
+  const name=safeText(data.name,120)
+  const phone=safeText(data.phone,35)
+  if (name.length<2) return error('יש להזין שם מלא')
+  if (phone && !/^[+0-9()\-\s]{7,35}$/.test(phone)) return error('מספר הטלפון אינו תקין')
+  await db.batch([
+    db.prepare('UPDATE users SET name=? WHERE id=? AND role=\'customer\'').bind(name,user.id),
+    db.prepare(`INSERT INTO customer_profiles(user_id,phone,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone,updated_at=CURRENT_TIMESTAMP`).bind(user.id,phone),
+    db.prepare('INSERT INTO audit_events(id,actor_id,action,target_id,detail_json) VALUES (?,?,?,?,?)')
+      .bind(randomId(),user.id,'customer.profile.update',user.id,JSON.stringify({phone_updated:true})),
+  ])
+  return customerAccount(db,{...user,name})
 }
 
 async function merchantOverview(db: Database, user: User) {
@@ -106,7 +166,7 @@ async function profile(request: Request, db: Database, user: User) {
   const legal = safeText(data.legal_name, 160), registration = safeText(data.registration_number, 30)
   const entity = safeText(data.entity_type, 60), email = safeText(data.contact_email, 254), phone = safeText(data.contact_phone, 35)
   const storeName = safeText(data.store_name, 120), description = safeText(data.description, 1000), city = safeText(data.city, 80)
-  if (!storeName || !legal || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return error('יש למלא שם חנות, שם משפטי ומייל תקין')
+  if (!storeName || !legal || !email || !validEmail(email)) return error('יש למלא שם חנות, שם משפטי ומייל תקין')
   await db.batch([
     db.prepare('UPDATE stores SET name=?,description=?,city=? WHERE id=?').bind(storeName,description,city,user.store_id),
     db.prepare(`INSERT INTO business_profiles(store_id,legal_name,entity_type,registration_number,contact_email,contact_phone,status)
@@ -148,7 +208,7 @@ async function createStore(request: Request, db: Database, actor: User) {
   const data = await body(request)
   const name = safeText(data.name,120), email = safeText(data.email,254).toLowerCase(), password = typeof data.password === 'string' ? data.password : ''
   const city = safeText(data.city,80), category = safeText(data.category,70)
-  if (!name || !category || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 12) return error('נדרשים שם, קטגוריה, מייל תקין וסיסמה של 12 תווים לפחות')
+  if (!name || !category || !validEmail(email) || password.length < 12) return error('נדרשים שם, קטגוריה, מייל תקין וסיסמה של 12 תווים לפחות')
   const id = randomId(), uid = randomId(), salt = randomToken()
   const link = `${slug(name) || 'store'}-${id.slice(0,8)}`
   try {
@@ -156,6 +216,7 @@ async function createStore(request: Request, db: Database, actor: User) {
       db.prepare("INSERT INTO stores(id,slug,name,category,city,status) VALUES (?,?,?,?,?,'draft')").bind(id,link,name,category,city),
       db.prepare("INSERT INTO users(id,email,name,role,store_id,password_salt,password_hash) VALUES (?,?,?,'merchant',?,?,?)")
         .bind(uid,email,name,id,salt,await passwordHash(password,salt)),
+      db.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_subject) VALUES (?,?, 'password', ?)").bind(randomId(),uid,email),
       db.prepare('INSERT INTO business_profiles(store_id) VALUES (?)').bind(id),
       db.prepare('INSERT INTO payment_accounts(store_id) VALUES (?)').bind(id),
       db.prepare('INSERT INTO invoice_accounts(store_id) VALUES (?)').bind(id),
@@ -180,17 +241,34 @@ export async function onRequest(context: Context): Promise<Response> {
     if ((path === '/checkout/quote' || path === '/purchase-requests') && !await requestsReady(db))
       return error('בקשות רכישה יופעלו לאחר עדכון מסד הנתונים',503)
     if (path === '/checkout/quote' && method === 'POST') return await quoteRequest(request,db)
-    if (path === '/purchase-requests' && method === 'POST') return await submitRequest(request,db)
+    if (path === '/purchase-requests' && method === 'POST') {
+      const customer = await getUser(request,db)
+      return await submitRequest(request,db,customer)
+    }
     if (path === '/checkout' && method === 'POST') return error('התשלום יופעל רק לאחר חיבור ספק סליקה מאושר',503)
+    if (path === '/register' && method === 'POST') return registerCustomer(request,db)
     if (path === '/login' && method === 'POST') return login(request,db)
     const user = await getUser(request,db)
     if (path === '/session' && method === 'GET') return json({user})
     if (path === '/logout' && method === 'POST') {
       const token = /(?:^|;\s*)madarom_session=([0-9a-f]{64})(?:;|$)/.exec(request.headers.get('Cookie') || '')?.[1]
       if (token) await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await sha256(token)).run()
-      return json({ok:true},200,{'set-cookie':'madarom_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0'})
+      const secure = new URL(request.url).protocol === 'https:' ? ' Secure;' : ''
+      return json({ok:true},200,{'set-cookie':`madarom_session=; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=0`})
     }
     if (!user) return error('יש להתחבר למערכת',401)
+    if (path === '/notifications' && method === 'GET') return notificationResponse(db,user)
+    if (path === '/notifications/read-all' && method === 'PATCH') return markAllNotificationsRead(db,user)
+    const notificationId=/^\/notifications\/([\w-]+)$/.exec(path)?.[1]
+    if (notificationId && method === 'PATCH') return markNotificationRead(db,user,notificationId)
+    if (path === '/account' && method === 'GET') {
+      if (user.role !== 'customer') return forbidden()
+      return customerAccount(db,user)
+    }
+    if (path === '/account' && method === 'PATCH') {
+      if (user.role !== 'customer') return forbidden()
+      return updateCustomerAccount(request,db,user)
+    }
     if (path.startsWith('/merchant/')) {
       if (user.role !== 'merchant' || !user.store_id) return forbidden()
       if (path === '/merchant/overview' && method === 'GET') return merchantOverview(db,user)
