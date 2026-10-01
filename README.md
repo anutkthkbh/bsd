@@ -42,7 +42,7 @@ npm test
 npm run build
 ```
 
-GitHub Actions מריץ את שלוש הבדיקות אוטומטית בענפי `feature/**`, ב־Pull Requests וב־`main`.
+GitHub Actions מריץ את שלוש הבדיקות אוטומטית בענפי `feature/**`, ב־Pull Requests וב־`main`. אבן הדרך של חשבונות לקוח וההתראות עברה TypeScript, בדיקות API ו־production build בענף הפיתוח.
 
 ## Cloudflare
 
