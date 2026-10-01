@@ -76,7 +76,7 @@ export async function submitRequest(request:Request,db:Database,user?:User|null)
   const enteredPhone=safeText(data.customer_phone,35)
   const customer_name=authenticatedCustomer?.name || enteredName
   const customer_email=authenticatedCustomer?.email.toLowerCase() || enteredEmail
-  const customer_phone=safeText(profile?.phone || enteredPhone,35)
+  const customer_phone=safeText(enteredPhone || profile?.phone || '',35)
   const key=safeText(data.idempotency_key,70)
   if (customer_name.length<2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer_email) ||
     !/^[+0-9 ()-]{7,35}$/.test(customer_phone) || !/^[0-9a-f-]{36}$/.test(key) || data.website)
