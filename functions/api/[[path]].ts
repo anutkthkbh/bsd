@@ -2,6 +2,7 @@ import type { Context, Database, User } from '../_lib/types'
 import { body, error, getUser, json, money, passwordHash, randomId, randomToken, safeText, sameOrigin, sha256, slug, validUrl, verifyPassword } from '../_lib/security'
 import { customerRequests, merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
 import { getMedia, uploadMedia } from '../_lib/media'
+import { markAllNotificationsRead, markNotificationRead, notificationResponse } from '../_lib/notifications'
 
 type Row = Record<string, unknown>
 const values = <T>(query: Promise<{results:T[]}>) => query.then(result => result.results)
@@ -256,6 +257,10 @@ export async function onRequest(context: Context): Promise<Response> {
       return json({ok:true},200,{'set-cookie':`madarom_session=; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=0`})
     }
     if (!user) return error('יש להתחבר למערכת',401)
+    if (path === '/notifications' && method === 'GET') return notificationResponse(db,user)
+    if (path === '/notifications/read-all' && method === 'PATCH') return markAllNotificationsRead(db,user)
+    const notificationId=/^\/notifications\/([\w-]+)$/.exec(path)?.[1]
+    if (notificationId && method === 'PATCH') return markNotificationRead(db,user,notificationId)
     if (path === '/account' && method === 'GET') {
       if (user.role !== 'customer') return forbidden()
       return customerAccount(db,user)
