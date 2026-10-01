@@ -1,6 +1,6 @@
 import type { Context, Database, User } from '../_lib/types'
 import { body, error, getUser, json, money, passwordHash, randomId, randomToken, safeText, sameOrigin, sha256, slug, validUrl, verifyPassword } from '../_lib/security'
-import { merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
+import { customerRequests, merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
 import { getMedia, uploadMedia } from '../_lib/media'
 
 type Row = Record<string, unknown>
@@ -77,8 +77,27 @@ async function login(request: Request, db: Database) {
 }
 
 async function customerAccount(db:Database,user:User) {
-  const profile = await db.prepare('SELECT phone,email_verified,phone_verified FROM customer_profiles WHERE user_id=?').bind(user.id).first<Row>()
-  return json({user,profile})
+  const [profile,requests] = await Promise.all([
+    db.prepare('SELECT phone,email_verified,phone_verified,updated_at FROM customer_profiles WHERE user_id=?').bind(user.id).first<Row>(),
+    customerRequests(db,user.id),
+  ])
+  return json({user,profile,requests})
+}
+
+async function updateCustomerAccount(request:Request,db:Database,user:User) {
+  const data=await body(request)
+  const name=safeText(data.name,120)
+  const phone=safeText(data.phone,35)
+  if (name.length<2) return error('יש להזין שם מלא')
+  if (phone && !/^[+0-9()\-\s]{7,35}$/.test(phone)) return error('מספר הטלפון אינו תקין')
+  await db.batch([
+    db.prepare('UPDATE users SET name=? WHERE id=? AND role=\'customer\'').bind(name,user.id),
+    db.prepare(`INSERT INTO customer_profiles(user_id,phone,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone,updated_at=CURRENT_TIMESTAMP`).bind(user.id,phone),
+    db.prepare('INSERT INTO audit_events(id,actor_id,action,target_id,detail_json) VALUES (?,?,?,?,?)')
+      .bind(randomId(),user.id,'customer.profile.update',user.id,JSON.stringify({phone_updated:true})),
+  ])
+  return customerAccount(db,{...user,name})
 }
 
 async function merchantOverview(db: Database, user: User) {
@@ -237,6 +256,10 @@ export async function onRequest(context: Context): Promise<Response> {
     if (path === '/account' && method === 'GET') {
       if (user.role !== 'customer') return forbidden()
       return customerAccount(db,user)
+    }
+    if (path === '/account' && method === 'PATCH') {
+      if (user.role !== 'customer') return forbidden()
+      return updateCustomerAccount(request,db,user)
     }
     if (path.startsWith('/merchant/')) {
       if (user.role !== 'merchant' || !user.store_id) return forbidden()
