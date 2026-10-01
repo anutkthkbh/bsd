@@ -1,5 +1,6 @@
 node_modules/
 dist/
+worker/
 .wrangler/
 .env
 .env.*
@@ -9,5 +10,4 @@ dist/
 *.sqlite*
 *.zip
 admin-seed.sql
-wrangler.jsonc
 *.log
