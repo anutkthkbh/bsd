@@ -240,7 +240,10 @@ export async function onRequest(context: Context): Promise<Response> {
     if ((path === '/checkout/quote' || path === '/purchase-requests') && !await requestsReady(db))
       return error('בקשות רכישה יופעלו לאחר עדכון מסד הנתונים',503)
     if (path === '/checkout/quote' && method === 'POST') return await quoteRequest(request,db)
-    if (path === '/purchase-requests' && method === 'POST') return await submitRequest(request,db)
+    if (path === '/purchase-requests' && method === 'POST') {
+      const customer = await getUser(request,db)
+      return await submitRequest(request,db,customer)
+    }
     if (path === '/checkout' && method === 'POST') return error('התשלום יופעל רק לאחר חיבור ספק סליקה מאושר',503)
     if (path === '/register' && method === 'POST') return registerCustomer(request,db)
     if (path === '/login' && method === 'POST') return login(request,db)
