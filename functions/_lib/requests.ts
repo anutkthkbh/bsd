@@ -1,12 +1,11 @@
 import type { Database, Statement, User } from './types'
-import { body, error, json, money, randomId, safeText, sha256 } from './security'
+import { body, error, getUser, json, money, randomId, safeText, sha256 } from './security'
 
 type ProductRow = {
   id:string; name:string; store_id:string; store_name:string; price_agorot:number
   stock:number; variants_json:string
 }
 type Line = {product_id:string; name:string; store_id:string; store_name:string; variant:string; quantity:number; unit_price_agorot:number; line_total_agorot:number}
-
 type CustomerProfile = { phone:string }
 
 export class RequestError extends Error {
@@ -67,7 +66,8 @@ export async function quoteRequest(request:Request,db:Database) {
 
 export async function submitRequest(request:Request,db:Database,user?:User|null) {
   const data=await body(request)
-  const authenticatedCustomer=user?.role==='customer' ? user : null
+  const sessionUser=user ?? await getUser(request,db)
+  const authenticatedCustomer=sessionUser?.role==='customer' ? sessionUser : null
   const profile=authenticatedCustomer
     ? await db.prepare('SELECT phone FROM customer_profiles WHERE user_id=?').bind(authenticatedCustomer.id).first<CustomerProfile>()
     : null
