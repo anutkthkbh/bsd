@@ -78,3 +78,41 @@ test('ledger rejects edits and deletes',()=>{
   assert.throws(()=>sql.prepare('UPDATE ledger_entries SET amount_agorot=0 WHERE id=?').run(id))
   assert.throws(()=>sql.prepare('DELETE FROM ledger_entries WHERE id=?').run(id))
 })
+
+test('purchase requests reprice server-side, split by store, isolate contact details and never charge',async()=>{
+  const stores=sql.prepare('SELECT id FROM stores ORDER BY name').all()
+  assert.equal(stores.length,2)
+  const otherStore=stores.find(s=>s.id!==sql.prepare('SELECT store_id FROM products LIMIT 1').get().store_id)
+  const productOne=sql.prepare('SELECT id FROM products LIMIT 1').get().id
+  const productTwo=randomUUID()
+  sql.prepare(`INSERT INTO products(id,store_id,slug,name,category,price_agorot,stock,status)
+    VALUES (?,?,?,?,?,?,?,'active')`).run(productTwo,otherStore.id,'other-item','מוצר שני','בית',7300,4)
+  const items=[{product_id:productOne,quantity:2},{product_id:productTwo,quantity:1}]
+  const quote=await call('/checkout/quote',{method:'POST',body:{items}})
+  assert.equal(quote.status,200)
+  assert.equal(quote.data.groups.length,2)
+  assert.equal(quote.data.total_agorot,sql.prepare('SELECT price_agorot FROM products WHERE id=?').get(productOne).price_agorot*2+7300)
+  assert.equal(quote.data.payment_available,false)
+  assert.equal((await call('/checkout/quote',{method:'POST',body:{items:[{product_id:productOne,quantity:4}]}})).status,409)
+  assert.equal((await call('/checkout/quote',{method:'POST',body:{items:[{product_id:productOne,quantity:1,variant:'forged'}]}})).status,409)
+  const key=randomUUID(),customer={customer_name:'לקוח בדיקה',customer_email:'buyer@example.com',customer_phone:'050-1234567'}
+  assert.equal((await call('/purchase-requests',{method:'POST',body:{items,idempotency_key:randomUUID(),...customer,expected_total_agorot:1}})).status,409)
+  const submitted={items,idempotency_key:key,...customer,expected_total_agorot:quote.data.total_agorot}
+  const sent=await call('/purchase-requests',{method:'POST',body:submitted})
+  assert.equal(sent.status,201)
+  assert.equal((await call('/purchase-requests',{method:'POST',body:submitted})).data.id,sent.data.id)
+  assert.equal((await call('/purchase-requests',{method:'POST',body:{...submitted,items:[items[0]]}})).status,409)
+  assert.equal(sql.prepare('SELECT count(*) AS n FROM purchase_requests').get().n,1)
+  assert.equal(sql.prepare('SELECT count(*) AS n FROM store_requests').get().n,2)
+  assert.equal(sql.prepare('SELECT count(*) AS n FROM orders').get().n,0)
+  assert.equal(sql.prepare('SELECT count(*) AS n FROM payment_attempts').get().n,0)
+  const merchantOne=await call('/login',{method:'POST',body:{email:'one@example.com',password:'merchant-passphrase-1'}})
+  const merchantTwo=await call('/login',{method:'POST',body:{email:'two@example.com',password:'merchant-passphrase-2'}})
+  const one=(await call('/merchant/overview',{cookie:merchantOne.cookie})).data.requests
+  const two=(await call('/merchant/overview',{cookie:merchantTwo.cookie})).data.requests
+  assert.equal(one.length,1);assert.equal(two.length,1)
+  assert.equal(one[0].items.length,1);assert.equal(two[0].items.length,1)
+  assert.equal(one[0].customer_email,customer.customer_email)
+  assert.equal((await call(`/merchant/requests/${two[0].id}`,{method:'PATCH',cookie:merchantOne.cookie,body:{status:'contacted'}})).status,404)
+  assert.equal((await call(`/merchant/requests/${one[0].id}`,{method:'PATCH',cookie:merchantOne.cookie,body:{status:'contacted'}})).status,200)
+})

@@ -1,5 +1,6 @@
 import type { Context, Database, User } from '../_lib/types'
 import { body, error, getUser, json, money, passwordHash, randomId, randomToken, safeText, sameOrigin, sha256, slug, validUrl, verifyPassword } from '../_lib/security'
+import { merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
 
 type Row = Record<string, unknown>
 const values = <T>(query: Promise<{results:T[]}>) => query.then(result => result.results)
@@ -41,7 +42,7 @@ async function login(request: Request, db: Database) {
 
 async function merchantOverview(db: Database, user: User) {
   const id = user.store_id
-  const [store, products, orders, ledger, profile, payment, invoice] = await Promise.all([
+  const [store, products, orders, ledger, profile, payment, invoice, requests] = await Promise.all([
     db.prepare('SELECT * FROM stores WHERE id=?').bind(id).first<Row>(),
     values(db.prepare('SELECT * FROM products WHERE store_id=? ORDER BY created_at DESC').bind(id).all<Row>()),
     values(db.prepare('SELECT * FROM orders WHERE store_id=? ORDER BY created_at DESC LIMIT 100').bind(id).all<Row>()),
@@ -49,8 +50,9 @@ async function merchantOverview(db: Database, user: User) {
     db.prepare('SELECT * FROM business_profiles WHERE store_id=?').bind(id).first<Row>(),
     db.prepare('SELECT provider,onboarding_status,charges_enabled,payouts_enabled FROM payment_accounts WHERE store_id=?').bind(id).first<Row>(),
     db.prepare('SELECT provider,connection_status FROM invoice_accounts WHERE store_id=?').bind(id).first<Row>(),
+    merchantRequests(db,id!),
   ])
-  return json({store,products,orders,ledger,profile,payment,invoice})
+  return json({store,products,orders,ledger,profile,payment,invoice,requests})
 }
 
 function parseVariants(input: unknown): string | null {
@@ -168,8 +170,12 @@ export async function onRequest(context: Context): Promise<Response> {
   if (!['GET','POST','PATCH','DELETE'].includes(method)) return error('שיטה לא נתמכת',405)
   if (method !== 'GET' && !sameOrigin(request)) return forbidden()
   try {
-    if (path === '/health' && method === 'GET') { await db.prepare('SELECT 1').first(); return json({ok:true}) }
+    if (path === '/health' && method === 'GET') { await db.prepare('SELECT 1').first(); return json({ok:true,purchase_requests_ready:await requestsReady(db)}) }
     if (path === '/catalog' && method === 'GET') return catalog(db)
+    if ((path === '/checkout/quote' || path === '/purchase-requests') && !await requestsReady(db))
+      return error('בקשות רכישה יופעלו לאחר עדכון מסד הנתונים',503)
+    if (path === '/checkout/quote' && method === 'POST') return await quoteRequest(request,db)
+    if (path === '/purchase-requests' && method === 'POST') return await submitRequest(request,db)
     if (path === '/checkout' && method === 'POST') return error('התשלום יופעל רק לאחר חיבור ספק סליקה מאושר',503)
     if (path === '/login' && method === 'POST') return login(request,db)
     const user = await getUser(request,db)
@@ -183,6 +189,8 @@ export async function onRequest(context: Context): Promise<Response> {
     if (path.startsWith('/merchant/')) {
       if (user.role !== 'merchant' || !user.store_id) return forbidden()
       if (path === '/merchant/overview' && method === 'GET') return merchantOverview(db,user)
+      const requestId = /^\/merchant\/requests\/([\w-]+)$/.exec(path)?.[1]
+      if (requestId && method === 'PATCH') return await updateMerchantRequest(request,db,user.store_id,requestId)
       if (path === '/merchant/profile' && method === 'PATCH') return profile(request,db,user)
       if (path === '/merchant/products' && method === 'POST') return saveProduct(request,db,user)
       const productId = /^\/merchant\/products\/([\w-]+)$/.exec(path)?.[1]
@@ -220,6 +228,7 @@ export async function onRequest(context: Context): Promise<Response> {
     }
     return error('הנתיב לא נמצא',404)
   } catch (cause) {
+    if (cause instanceof RequestError) return error(cause.message,cause.status)
     if (cause instanceof SyntaxError || cause instanceof Error && /הבקשה גדולה מדי|נתונים לא תקינים/.test(cause.message)) return error('נתונים לא תקינים')
     console.error('API failure',cause)
     return error('תקלה זמנית. נסו שוב בעוד רגע',500)

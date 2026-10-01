@@ -9,8 +9,18 @@ export interface Product {
 export interface Account { id:string; email:string; name:string; role:'admin'|'merchant'; store_id:string|null }
 export interface Order { id:string; customer_name:string; total_agorot:number; payment_status:string; fulfillment_status:string; created_at:string }
 export interface Entry { id:string; kind:string; amount_agorot:number; order_id:string|null; created_at:string }
+export interface PurchaseRequest {
+  id:string; request_id:string; status:'new'|'contacted'|'closed'; subtotal_agorot:number; created_at:string
+  customer_name:string; customer_email:string; customer_phone:string
+  items:Array<{product_name:string;variant:string;quantity:number;unit_price_agorot:number}>
+}
+export interface BasketQuote {
+  groups:Array<{store_id:string;store_name:string;subtotal_agorot:number;items:Array<{
+    product_id:string;name:string;variant:string;quantity:number;unit_price_agorot:number;line_total_agorot:number
+  }>}>;total_agorot:number;currency:'ILS';payment_available:boolean;note:string
+}
 export interface MerchantData {
-  store:Store; products:Product[]; orders:Order[]; ledger:Entry[]
+  store:Store; products:Product[]; orders:Order[]; ledger:Entry[]; requests:PurchaseRequest[]
   profile:Record<string,string>|null; payment:Record<string,string|number>|null; invoice:Record<string,string>|null
 }
 export interface AdminData { stores:Store[]; users:Array<{id:string;email:string;store_id:string}> }

@@ -16,3 +16,28 @@
 .round-add{display:grid;place-items:center}
 .nav a.mobile-only{display:none}
 @media(max-width:700px){.nav a.mobile-only{display:flex}}
+
+.checkout-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(280px,.85fr);gap:24px;align-items:start}
+.checkout-page .page-intro{max-width:690px}
+.checkout-summary{position:sticky;top:90px}
+.checkout-store{border-top:1px solid var(--line);padding:18px 0}
+.checkout-store h3{font-size:1.1rem;margin:0 0 12px}
+.checkout-store p{display:flex;justify-content:space-between;gap:15px;font-size:.9rem;margin:9px 0}
+.checkout-store p span{max-width:70%}
+.checkout-store>strong{display:block;font-size:.85rem;margin-top:12px}
+.checkout-summary .total{border-top:1px solid var(--line);padding-top:20px}
+.checkout-summary small,.checkout-help{display:block;color:var(--muted);line-height:1.7}
+.checkout-help{margin-top:25px;font-size:.85rem}
+.checkout-done{background:#f4f1e9;padding:clamp(28px,6vw,72px);border-radius:8px;max-width:780px}
+.checkout-done h1{max-width:650px}.checkout-done p{line-height:1.8}
+.request-list{display:grid;gap:16px}
+.request-card{border:1px solid var(--line);background:#fbfaf6;border-radius:8px;padding:20px;min-width:0}
+.request-head,.request-actions{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.request-head strong,.request-head small,.request-items span{display:block}
+.request-head small{color:var(--muted);margin-top:5px}
+.request-badge{background:#e7eade;color:var(--olive);padding:5px 12px;border-radius:30px;font-size:.8rem}
+.request-items{display:grid;gap:6px;margin:18px 0;color:var(--muted);font-size:.88rem}
+.request-actions{justify-content:flex-start;border-top:1px solid var(--line);padding-top:14px}
+.request-actions a,.request-actions button{font:inherit;font-size:.84rem;color:var(--olive);background:none;border:0;padding:5px;cursor:pointer;overflow-wrap:anywhere}
+.request-actions a:hover,.request-actions button:hover{text-decoration:underline}
+@media(max-width:700px){.checkout-grid{grid-template-columns:1fr}.checkout-summary{position:static}.request-card{padding:15px}}
