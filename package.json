@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build:web": "vite build",
+    "build:functions": "wrangler pages functions build --outdir=./worker/",
+    "build": "npm run build:web && node scripts/prepare-worker-build.mjs && npm run build:functions",
+    "deploy": "wrangler deploy",
     "preview": "vite preview",
     "check": "tsc --noEmit",
     "admin:create": "node scripts/create-admin.mjs",
