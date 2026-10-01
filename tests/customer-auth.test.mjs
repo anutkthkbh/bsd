@@ -79,13 +79,14 @@ test('customer account keeps profile and purchase-request history isolated',asyn
     idempotency_key:randomUUID(),
     customer_name:'שם שלא אמור לגבור על החשבון',
     customer_email:'other@example.com',
-    customer_phone:'052-7654321',
+    customer_phone:'054-1112233',
     expected_total_agorot:quote.data.total_agorot,
   }})
   assert.equal(sent.status,201)
 
   const account=await call(DB,'/account',{cookie:registration.cookie})
   assert.equal(account.status,200)
+  assert.equal(account.data.profile.phone,'054-1112233')
   assert.equal(account.data.requests.length,1)
   assert.equal(account.data.requests[0].total_agorot,8400)
   assert.equal(account.data.requests[0].stores[0].store_name,'חנות היסטוריה')
@@ -94,7 +95,7 @@ test('customer account keeps profile and purchase-request history isolated',asyn
   assert.equal(saved.user_id,registration.data.user.id)
   assert.equal(saved.customer_name,'לקוח מעודכן')
   assert.equal(saved.customer_email,'buyer@example.com')
-  assert.equal(saved.customer_phone,'052-7654321')
+  assert.equal(saved.customer_phone,'054-1112233')
 
   assert.equal((await call(DB,'/merchant/overview',{cookie:registration.cookie})).status,403)
   assert.equal((await call(DB,'/admin/overview',{cookie:registration.cookie})).status,403)
