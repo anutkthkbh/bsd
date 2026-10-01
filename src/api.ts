@@ -6,7 +6,9 @@ export interface Product {
   price_agorot: number; image_url: string; stock: number; status?: string; variants_json: string
   store_name?: string; store_slug?: string; selected_variant?: string
 }
-export interface Account { id:string; email:string; name:string; role:'admin'|'merchant'; store_id:string|null }
+export interface Account { id:string; email:string; name:string; role:'admin'|'merchant'|'customer'; store_id:string|null }
+export interface CustomerProfile { phone:string; email_verified:number; phone_verified:number }
+export interface CustomerAccountData { user:Account; profile:CustomerProfile|null }
 export interface Order { id:string; customer_name:string; total_agorot:number; payment_status:string; fulfillment_status:string; created_at:string }
 export interface Entry { id:string; kind:string; amount_agorot:number; order_id:string|null; created_at:string }
 export interface PurchaseRequest {
