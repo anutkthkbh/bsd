@@ -15,7 +15,9 @@ export async function notificationsForUser(db:Database,user:User) {
   const notifications=(await db.prepare(`SELECT id,type,title,message,target_url,read_at,created_at
     FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 100`)
     .bind(user.id).all<NotificationRow>()).results
-  const unread=notifications.reduce((count,item)=>count+(item.read_at?0:1),0)
+  const count=await db.prepare('SELECT COUNT(*) AS total FROM notifications WHERE user_id=? AND read_at IS NULL')
+    .bind(user.id).first<{total:number}>()
+  const unread=count?.total||0
   return {notifications,unread}
 }
 

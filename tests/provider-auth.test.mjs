@@ -1,0 +1,219 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { DatabaseSync } from 'node:sqlite'
+import { readFileSync, readdirSync } from 'node:fs'
+import { randomUUID, pbkdf2Sync } from 'node:crypto'
+import { build } from 'esbuild'
+
+const compiled = await build({entryPoints:['functions/api/[[path]].ts'],bundle:true,platform:'node',format:'esm',write:false})
+const {onRequest} = await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'))
+
+function database() {
+  const sql = new DatabaseSync(':memory:')
+  sql.exec('PRAGMA foreign_keys=ON')
+  for (const file of readdirSync('migrations').sort()) sql.exec(readFileSync('migrations/'+file,'utf8'))
+  const DB={
+    prepare(query) {
+      const params=[]
+      const stmt={
+        bind(...args){params.push(...args);return stmt},
+        async first(){return sql.prepare(query).get(...params)??null},
+        async all(){return {results:sql.prepare(query).all(...params)}},
+        async run(){const result=sql.prepare(query).run(...params);return {meta:{changes:Number(result.changes)}}},
+      }
+      return stmt
+    },
+    async batch(stmts){
+      sql.exec('BEGIN')
+      try{const results=[];for(const stmt of stmts)results.push(await stmt.run());sql.exec('COMMIT');return results}
+      catch(error){sql.exec('ROLLBACK');throw error}
+    },
+  }
+  return {sql,DB}
+}
+
+async function call(DB,path,{method='GET',body,cookie,env={}}={}) {
+  const headers={}
+  if(body!==undefined)headers['content-type']='application/json'
+  if(cookie)headers.Cookie=cookie
+  const response=await onRequest({
+    request:new Request('https://madarom.example/api'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}),
+    env:{DB,...env},
+    params:{path:path.split('?')[0].slice(1).split('/')},
+  })
+  return {status:response.status,data:await response.json().catch(()=>null),headers:response.headers,cookie:response.headers.get('set-cookie')?.split(';')[0]}
+}
+
+const providers={RESEND_API_KEY:'test-only',EMAIL_FROM:'Madarom <test@example.com>',TWILIO_ACCOUNT_SID:'test-only',TWILIO_AUTH_TOKEN:'test-only',TWILIO_FROM:'+15005550006',GOOGLE_CLIENT_ID:'test-only',GOOGLE_CLIENT_SECRET:'test-only'}
+function delivery(t,{fail=false}={}) {
+  const messages=[]
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(String(url)==='https://api.resend.com/emails') {
+      const data=JSON.parse(options.body);messages.push({to:data.to[0],code:data.text.match(/\b\d{6}\b/)[0]})
+    } else if(String(url).startsWith('https://api.twilio.com/')) {
+      const data=new URLSearchParams(options.body);messages.push({to:data.get('To'),code:data.get('Body').match(/\b\d{6}\b/)[0]})
+    } else throw new Error('unexpected external request')
+    return new Response('{}',{status:fail?503:200})
+  })
+  return messages
+}
+async function emailAccount(DB,messages,email='customer@example.com') {
+  const request=await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',target:email,name:'לקוח בדיקה',role:'admin'}})
+  assert.equal(request.status,201)
+  assert.deepEqual(Object.keys(request.data).sort(),['challenge_id','ok'])
+  const verified=await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:request.data.challenge_id,code:messages.at(-1).code}})
+  assert.equal(verified.status,200)
+  return {...verified,challenge_id:request.data.challenge_id,code:messages.at(-1).code}
+}
+
+test('unconfigured providers fail honestly and failed delivery leaves no usable challenge',async t=>{
+  const {sql,DB}=database()
+  const cap=await call(DB,'/auth/capabilities');assert.deepEqual(cap.data,{email:false,sms:false,google:false})
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',body:{channel:'email',target:'buyer@example.com',name:'לקוח'}})).status,503)
+  assert.equal((await call(DB,'/auth/google/start')).status,503)
+  delivery(t,{fail:true})
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',target:'buyer@example.com',name:'לקוח'}})).status,503)
+  assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM verification_challenges').get().n,0)
+})
+
+test('email OTP registers verified customers, prevents role escalation/replay and logs out',async t=>{
+  const {sql,DB}=database(),messages=delivery(t)
+  const account=await emailAccount(DB,messages)
+  assert.equal(account.data.user.role,'customer');assert.equal(account.data.redirect,'/account')
+  assert.match(account.headers.get('set-cookie'),/HttpOnly; Secure; SameSite=Lax/)
+  assert.notEqual(sql.prepare('SELECT code_hash FROM verification_challenges WHERE id=?').get(account.challenge_id).code_hash,account.code)
+  assert.equal((await call(DB,'/account',{cookie:account.cookie})).data.profile.email_verified,1)
+  assert.equal((await call(DB,'/admin/overview',{cookie:account.cookie})).status,403)
+  assert.equal((await call(DB,'/merchant/overview',{cookie:account.cookie})).status,403)
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:account.challenge_id,code:account.code}})).status,401)
+  await call(DB,'/logout',{method:'POST',cookie:account.cookie})
+  assert.equal((await call(DB,'/session',{cookie:account.cookie})).data.user,null)
+})
+
+test('codes expire, lock after five attempts, and sends are rate limited',async t=>{
+  const {sql,DB}=database(),messages=delivery(t)
+  const request=await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',target:'lock@example.com',name:'לקוח'}})
+  const code=messages.at(-1).code,wrong=code==='000000'?'111111':'000000',payload={challenge_id:request.data.challenge_id}
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',target:'lock@example.com',name:'לקוח'}})).status,429)
+  for(let i=0;i<5;i++)assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:{...payload,code:wrong}})).status,401)
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:{...payload,code}})).status,401)
+  const expired=await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',target:'expiry@example.com',name:'לקוח'}})
+  sql.prepare("UPDATE verification_challenges SET expires_at=datetime('now','-1 second') WHERE id=?").run(expired.data.challenge_id)
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:expired.data.challenge_id,code:messages.at(-1).code}})).status,401)
+  for(let i=0;i<4;i++) {
+    sql.prepare("UPDATE verification_challenges SET created_at=datetime('now','-2 minutes') WHERE target='lock@example.com'").run()
+    assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',target:'lock@example.com',name:'לקוח'}})).status,201)
+  }
+  sql.prepare("UPDATE verification_challenges SET created_at=datetime('now','-2 minutes')").run()
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',target:'lock@example.com',name:'לקוח'}})).status,429)
+})
+
+test('verified email sends existing staff to their assigned management area',async t=>{
+  const {sql,DB}=database(),messages=delivery(t),store=randomUUID()
+  sql.prepare("INSERT INTO stores(id,slug,name,category) VALUES (?,?,?,?)").run(store,'auth-store','חנות בדיקה','בית')
+  for(const [role,path] of [['admin','/admin'],['merchant','/merchant']]) {
+    sql.prepare('INSERT INTO users(id,email,name,role,store_id) VALUES (?,?,?,?,?)').run(randomUUID(),`${role}@example.com`,'משתמש בדיקה',role,role==='merchant'?store:null)
+    const user=await emailAccount(DB,messages,`${role}@example.com`)
+    assert.equal(user.data.user.role,role);assert.equal(user.data.redirect,path)
+  }
+})
+
+test('SMS proof binds to the current account, cannot trust an entered phone, and revokes on change',async t=>{
+  const {sql,DB}=database(),messages=delivery(t),account=await emailAccount(DB,messages)
+  await call(DB,'/account',{method:'PATCH',cookie:account.cookie,body:{name:'לקוח בדיקה',phone:'0501234567'}})
+  const before=messages.length
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'sms',target:'0501234567'}})).status,409)
+  assert.equal(messages.length,before)
+  const request=await call(DB,'/auth/request-code',{method:'POST',env:providers,cookie:account.cookie,body:{channel:'sms',target:'0501234567',purpose:'verify'}})
+  assert.equal(request.status,201);assert.equal(messages.at(-1).to,'+972501234567')
+  const payload={challenge_id:request.data.challenge_id,code:messages.at(-1).code}
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:payload})).status,401)
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',cookie:account.cookie,body:payload})).status,200)
+  assert.equal((await call(DB,'/account',{cookie:account.cookie})).data.profile.phone_verified,1)
+  await call(DB,'/account',{method:'PATCH',cookie:account.cookie,body:{name:'לקוח בדיקה',phone:'050-1234567'}})
+  assert.equal((await call(DB,'/account',{cookie:account.cookie})).data.profile.phone_verified,1)
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider='sms_code'").get().n,1)
+  sql.prepare("UPDATE verification_challenges SET created_at=datetime('now','-2 minutes')").run()
+  const login=await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'sms',target:'0501234567'}})
+  const session=await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:login.data.challenge_id,code:messages.at(-1).code}})
+  assert.equal(session.data.user.id,account.data.user.id)
+  await call(DB,'/account',{method:'PATCH',cookie:account.cookie,body:{name:'לקוח בדיקה',phone:'0521234567'}})
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider='sms_code'").get().n,0)
+  assert.equal((await call(DB,'/account',{cookie:account.cookie})).data.profile.phone_verified,0)
+})
+
+test('verified email invalidates credentials from an unverified password registration',async t=>{
+  const {sql,DB}=database(),messages=delivery(t)
+  const id=randomUUID(),salt='local-test-salt'
+  sql.prepare("INSERT INTO users(id,email,name,role,password_salt,password_hash) VALUES (?,?,?,'customer',?,?)").run(id,'customer@example.com','שם ישן',salt,pbkdf2Sync('very-secure-old-password',salt,210000,32,'sha256').toString('hex'))
+  sql.prepare('INSERT INTO customer_profiles(user_id) VALUES (?)').run(id)
+  const old=await call(DB,'/login',{method:'POST',body:{email:'customer@example.com',password:'very-secure-old-password'}})
+  const account=await emailAccount(DB,messages)
+  assert.equal(account.data.user.id,old.data.user.id)
+  assert.equal((await call(DB,'/session',{cookie:old.cookie})).data.user,null)
+  assert.equal((await call(DB,'/login',{method:'POST',body:{email:'customer@example.com',password:'very-secure-old-password'}})).status,401)
+  assert.equal(sql.prepare("SELECT password_hash FROM users WHERE email='customer@example.com'").get().password_hash,'')
+})
+
+test('Google uses cookie state and PKCE, rejects replay/unverified email, and reuses account identity',async t=>{
+  const {sql,DB}=database();let verified=true,exchanges=0,subject='google-test-subject'
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(String(url)==='https://oauth2.googleapis.com/token') {
+      exchanges++;const data=new URLSearchParams(options.body)
+      assert.equal(data.get('redirect_uri'),'https://madarom.example/api/auth/google/callback')
+      assert.equal(data.get('code_verifier').length,64)
+      return Response.json({access_token:'test-access-token'})
+    }
+    assert.equal(String(url),'https://openidconnect.googleapis.com/v1/userinfo')
+    return Response.json({sub:subject,email:'google@gmail.com',email_verified:verified,name:'לקוח Google'})
+  })
+  async function start(){const response=await call(DB,'/auth/google/start',{env:providers});assert.equal(response.status,302);const url=new URL(response.headers.get('location'));assert.equal(url.searchParams.get('code_challenge_method'),'S256');return {response,state:url.searchParams.get('state')}}
+  const first=await start()
+  assert.equal((await call(DB,`/auth/google/callback?state=${first.state}&code=test`,{env:providers})).headers.get('location'),'/login?error=google')
+  assert.equal(exchanges,0)
+  const done=await call(DB,`/auth/google/callback?state=${first.state}&code=test`,{env:providers,cookie:first.response.cookie})
+  assert.equal(done.headers.get('location'),'https://madarom.example/account')
+  assert.match(done.headers.get('set-cookie'),/madarom_session=/)
+  const second=await start()
+  await call(DB,`/auth/google/callback?state=${second.state}&code=test`,{env:providers,cookie:second.response.cookie})
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM users WHERE email='google@gmail.com'").get().n,1)
+  assert.equal((await call(DB,`/auth/google/callback?state=${first.state}&code=test`,{env:providers,cookie:first.response.cookie})).headers.get('location'),'/login?error=google')
+  verified=false;subject='unverified-subject';const bad=await start()
+  assert.equal((await call(DB,`/auth/google/callback?state=${bad.state}&code=test`,{env:providers,cookie:bad.response.cookie})).headers.get('location'),'/login?error=google')
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider_subject='unverified-subject'").get().n,0)
+})
+
+test('unverified password registration stays closed and notification count spans all unread rows',async t=>{
+  const {sql,DB}=database(),messages=delivery(t),account=await emailAccount(DB,messages)
+  for(let i=0;i<110;i++)sql.prepare('INSERT INTO notifications(id,user_id,type,title,message,dedupe_key) VALUES (?,?,?,?,?,?)').run(randomUUID(),account.data.user.id,'test','התראת בדיקה','הודעת בדיקה',`notification-${i}`)
+  const all=await call(DB,'/notifications',{cookie:account.cookie})
+  assert.equal(all.data.notifications.length,100);assert.equal(all.data.unread,110)
+  const another=await emailAccount(DB,messages,'another@example.com')
+  assert.equal((await call(DB,`/notifications/${all.data.notifications[0].id}`,{method:'PATCH',cookie:another.cookie})).status,404)
+  await call(DB,'/notifications/read-all',{method:'PATCH',cookie:account.cookie})
+  assert.equal((await call(DB,'/notifications',{cookie:account.cookie})).data.unread,0)
+  assert.equal((await call(DB,'/register',{method:'POST',body:{name:'לקוח בדיקה',email:'unverified@example.com',password:'secure-register-password'}})).status,403)
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM users WHERE email='unverified@example.com'").get().n,0)
+})
+
+test('external Google email requires authenticated linking before access to staff privileges',async t=>{
+  const {sql,DB}=database(),messages=delivery(t),id=randomUUID()
+  sql.prepare("INSERT INTO users(id,email,name,role) VALUES (?,?,?,'admin')").run(id,'admin@example.com','מנהל בדיקה')
+  const account=await emailAccount(DB,messages,'admin@example.com')
+  t.mock.method(globalThis,'fetch',async url=>String(url)==='https://oauth2.googleapis.com/token'
+    ?Response.json({access_token:'test-only'})
+    :Response.json({sub:'external-staff-sub',email:'admin@example.com',email_verified:true,name:'מנהל בדיקה'}))
+  async function start(link=false){const response=await call(DB,`/auth/google/start${link?'?link=1':''}`,{env:providers,cookie:link?account.cookie:undefined});return {response,state:new URL(response.headers.get('location')).searchParams.get('state')}}
+  const unlinked=await start()
+  assert.equal((await call(DB,`/auth/google/callback?state=${unlinked.state}&code=test`,{env:providers,cookie:unlinked.response.cookie})).headers.get('location'),'/login?error=google')
+  assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider='google'").get().n,0)
+  assert.equal((await call(DB,'/auth/google/start?link=1',{env:providers})).status,401)
+  const lostSession=await start(true)
+  assert.equal((await call(DB,`/auth/google/callback?state=${lostSession.state}&code=test`,{env:providers,cookie:lostSession.response.cookie})).headers.get('location'),'/login?error=google')
+  const linked=await start(true)
+  const done=await call(DB,`/auth/google/callback?state=${linked.state}&code=test`,{env:providers,cookie:linked.response.cookie+'; '+account.cookie})
+  assert.equal(done.headers.get('location'),'https://madarom.example/admin')
+  assert.equal(sql.prepare("SELECT user_id FROM auth_identities WHERE provider='google'").get().user_id,id)
+  const returning=await start()
+  assert.equal((await call(DB,`/auth/google/callback?state=${returning.state}&code=test`,{env:providers,cookie:returning.response.cookie})).headers.get('location'),'https://madarom.example/admin')
+})

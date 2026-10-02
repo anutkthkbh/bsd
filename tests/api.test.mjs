@@ -49,6 +49,8 @@ test('Cloudflare API keeps tenant data isolated and checkout disabled',async()=>
   assert.equal((await call('/login',{method:'POST',body:{email:'admin@example.com',password:'wrong'}})).status,401)
   for(let i=0;i<7;i++) await call('/login',{method:'POST',body:{email:'admin@example.com',password:'wrong'}})
   assert.equal((await call('/login',{method:'POST',body:{email:'admin@example.com',password:'wrong'}})).status,429)
+  assert.equal((await call('/login',{method:'POST',body:{email:'admin@example.com',password:'secure-admin-passphrase'}})).status,429)
+  sql.prepare("UPDATE login_attempts SET reset_at=datetime('now','-1 minute') WHERE email='admin@example.com'").run()
   const admin=await call('/login',{method:'POST',body:{email:'admin@example.com',password:'secure-admin-passphrase'}})
   assert.equal(admin.status,200)
   assert.ok(admin.cookie?.startsWith('madarom_session='))

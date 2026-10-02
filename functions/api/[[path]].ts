@@ -3,6 +3,7 @@ import { body, error, getUser, json, money, passwordHash, randomId, randomToken,
 import { customerRequests, merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
 import { getMedia, uploadMedia } from '../_lib/media'
 import { markAllNotificationsRead, markNotificationRead, notificationResponse } from '../_lib/notifications'
+import { AuthError, authCapabilities, googleCallback, googleStart, phoneNumber, requestCode, verifyCode } from '../_lib/auth'
 
 type Row = Record<string, unknown>
 const values = <T>(query: Promise<{results:T[]}>) => query.then(result => result.results)
@@ -28,46 +29,16 @@ async function createSession(request:Request, db:Database, account:User) {
     {'set-cookie':`madarom_session=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=604800`})
 }
 
-async function registerCustomer(request:Request, db:Database) {
-  const data = await body(request)
-  const name = safeText(data.name,120)
-  const email = safeText(data.email,254).toLowerCase()
-  const phone = safeText(data.phone,35)
-  const password = typeof data.password === 'string' ? data.password : ''
-  if (name.length < 2 || !validEmail(email) || password.length < 12) {
-    return error('יש להזין שם, מייל תקין וסיסמה של 12 תווים לפחות')
-  }
-  if (phone && !/^[+0-9()\-\s]{7,35}$/.test(phone)) return error('מספר הטלפון אינו תקין')
-  const id = randomId(), salt = randomToken()
-  try {
-    await db.batch([
-      db.prepare("INSERT INTO users(id,email,name,role,store_id,password_salt,password_hash) VALUES (?,?,?,'customer',NULL,?,?)")
-        .bind(id,email,name,salt,await passwordHash(password,salt)),
-      db.prepare('INSERT INTO customer_profiles(user_id,phone) VALUES (?,?)').bind(id,phone),
-      db.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_subject) VALUES (?,?, 'password', ?)")
-        .bind(randomId(),id,email),
-      db.prepare('INSERT INTO audit_events(id,actor_id,action,target_id,detail_json) VALUES (?,?,?,?,?)')
-        .bind(randomId(),id,'customer.register',id,JSON.stringify({method:'password'})),
-    ])
-  } catch {
-    return error('כבר קיים חשבון עם כתובת המייל הזו',409)
-  }
-  const account:User = {id,email,name,role:'customer',store_id:null}
-  const response = await createSession(request,db,account)
-  const headers = new Headers(response.headers)
-  return new Response(response.body,{status:201,headers})
-}
-
 async function login(request: Request, db: Database) {
   const data = await body(request)
   const email = safeText(data.email, 254).toLowerCase()
   const password = typeof data.password === 'string' ? data.password : ''
   if (!email || !password) return error('יש להזין כתובת מייל וסיסמה')
   const attempts = await db.prepare('SELECT count,reset_at FROM login_attempts WHERE email=?').bind(email).first<{count:number,reset_at:string}>()
+  if (attempts && attempts.count >= 8 && attempts.reset_at > new Date().toISOString().replace('T',' ').slice(0,19)) return error('יותר מדי ניסיונות. אפשר לנסות שוב בעוד כמה דקות', 429)
   const account = await db.prepare('SELECT * FROM users WHERE email=?').bind(email).first<User & {password_salt:string,password_hash:string}>()
   const matches = account && account.password_hash && await verifyPassword(password, account.password_salt, account.password_hash)
   if (!matches) {
-    if (attempts && attempts.count >= 8 && attempts.reset_at > new Date().toISOString().replace('T',' ').slice(0,19)) return error('יותר מדי ניסיונות. אפשר לנסות שוב בעוד כמה דקות', 429)
     await db.prepare(`INSERT INTO login_attempts(email,count,reset_at) VALUES (?,1,datetime('now','+10 minutes'))
       ON CONFLICT(email) DO UPDATE SET count=CASE WHEN reset_at<datetime('now') THEN 1 ELSE count+1 END,
       reset_at=CASE WHEN reset_at<datetime('now') THEN datetime('now','+10 minutes') ELSE reset_at END`).bind(email).run()
@@ -88,17 +59,21 @@ async function customerAccount(db:Database,user:User) {
 async function updateCustomerAccount(request:Request,db:Database,user:User) {
   const data=await body(request)
   const name=safeText(data.name,120)
-  const phone=safeText(data.phone,35)
+  const rawPhone=safeText(data.phone,35)
+  const phone=rawPhone?phoneNumber(rawPhone):''
   if (name.length<2) return error('יש להזין שם מלא')
-  if (phone && !/^[+0-9()\-\s]{7,35}$/.test(phone)) return error('מספר הטלפון אינו תקין')
+  if (rawPhone && !phone) return error('מספר הטלפון אינו תקין')
   await db.batch([
     db.prepare('UPDATE users SET name=? WHERE id=? AND role=\'customer\'').bind(name,user.id),
     db.prepare(`INSERT INTO customer_profiles(user_id,phone,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
-      ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone,updated_at=CURRENT_TIMESTAMP`).bind(user.id,phone),
+      ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone,
+      phone_verified=CASE WHEN phone=excluded.phone THEN phone_verified ELSE 0 END,updated_at=CURRENT_TIMESTAMP`).bind(user.id,phone),
+    db.prepare("DELETE FROM auth_identities WHERE user_id=? AND provider='sms_code' AND provider_subject<>?")
+      .bind(user.id,phoneNumber(phone)),
     db.prepare('INSERT INTO audit_events(id,actor_id,action,target_id,detail_json) VALUES (?,?,?,?,?)')
       .bind(randomId(),user.id,'customer.profile.update',user.id,JSON.stringify({phone_updated:true})),
   ])
-  return customerAccount(db,{...user,name})
+  return await customerAccount(db,{...user,name})
 }
 
 async function merchantOverview(db: Database, user: User) {
@@ -235,8 +210,19 @@ export async function onRequest(context: Context): Promise<Response> {
   if (!['GET','POST','PATCH','DELETE'].includes(method)) return error('שיטה לא נתמכת',405)
   if (method !== 'GET' && !sameOrigin(request)) return forbidden()
   try {
+    if (path === '/auth/capabilities' && method === 'GET') {
+      try {await db.prepare('SELECT salt FROM verification_challenges LIMIT 1').first();return json(await authCapabilities(context.env))}
+      catch {return json({email:false,sms:false,google:false,setup_required:true})}
+    }
+    if (path === '/auth/request-code' && method === 'POST') return await requestCode(request,db,context.env)
+    if (path === '/auth/verify-code' && method === 'POST') return await verifyCode(request,db)
+    if (path === '/auth/google/start' && method === 'GET') return await googleStart(request,db,context.env)
+    if (path === '/auth/google/callback' && method === 'GET') {
+      try {return await googleCallback(request,db,context.env)}
+      catch {return new Response(null,{status:302,headers:{location:'/login?error=google','cache-control':'no-store'}})}
+    }
     if (path === '/health' && method === 'GET') { await db.prepare('SELECT 1').first(); return json({ok:true,purchase_requests_ready:await requestsReady(db)}) }
-    if (path === '/catalog' && method === 'GET') return catalog(db)
+    if (path === '/catalog' && method === 'GET') return await catalog(db)
     if (path.startsWith('/media/') && method === 'GET') return await getMedia(context.env.MEDIA,path.slice('/media/'.length))
     if ((path === '/checkout/quote' || path === '/purchase-requests') && !await requestsReady(db))
       return error('בקשות רכישה יופעלו לאחר עדכון מסד הנתונים',503)
@@ -246,8 +232,8 @@ export async function onRequest(context: Context): Promise<Response> {
       return await submitRequest(request,db,customer)
     }
     if (path === '/checkout' && method === 'POST') return error('התשלום יופעל רק לאחר חיבור ספק סליקה מאושר',503)
-    if (path === '/register' && method === 'POST') return registerCustomer(request,db)
-    if (path === '/login' && method === 'POST') return login(request,db)
+    if (path === '/register' && method === 'POST') return error('להרשמה יש לאמת כתובת מייל באמצעות קוד או Google',403)
+    if (path === '/login' && method === 'POST') return await login(request,db)
     const user = await getUser(request,db)
     if (path === '/session' && method === 'GET') return json({user})
     if (path === '/logout' && method === 'POST') {
@@ -257,28 +243,28 @@ export async function onRequest(context: Context): Promise<Response> {
       return json({ok:true},200,{'set-cookie':`madarom_session=; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=0`})
     }
     if (!user) return error('יש להתחבר למערכת',401)
-    if (path === '/notifications' && method === 'GET') return notificationResponse(db,user)
-    if (path === '/notifications/read-all' && method === 'PATCH') return markAllNotificationsRead(db,user)
+    if (path === '/notifications' && method === 'GET') return await notificationResponse(db,user)
+    if (path === '/notifications/read-all' && method === 'PATCH') return await markAllNotificationsRead(db,user)
     const notificationId=/^\/notifications\/([\w-]+)$/.exec(path)?.[1]
-    if (notificationId && method === 'PATCH') return markNotificationRead(db,user,notificationId)
+    if (notificationId && method === 'PATCH') return await markNotificationRead(db,user,notificationId)
     if (path === '/account' && method === 'GET') {
       if (user.role !== 'customer') return forbidden()
-      return customerAccount(db,user)
+      return await customerAccount(db,user)
     }
     if (path === '/account' && method === 'PATCH') {
       if (user.role !== 'customer') return forbidden()
-      return updateCustomerAccount(request,db,user)
+      return await updateCustomerAccount(request,db,user)
     }
     if (path.startsWith('/merchant/')) {
       if (user.role !== 'merchant' || !user.store_id) return forbidden()
-      if (path === '/merchant/overview' && method === 'GET') return merchantOverview(db,user)
+      if (path === '/merchant/overview' && method === 'GET') return await merchantOverview(db,user)
       if (path === '/merchant/media' && method === 'POST') return await uploadMedia(request,context.env.MEDIA,user.store_id)
       const requestId = /^\/merchant\/requests\/([\w-]+)$/.exec(path)?.[1]
       if (requestId && method === 'PATCH') return await updateMerchantRequest(request,db,user.store_id,requestId)
-      if (path === '/merchant/profile' && method === 'PATCH') return profile(request,db,user)
-      if (path === '/merchant/products' && method === 'POST') return saveProduct(request,db,user)
+      if (path === '/merchant/profile' && method === 'PATCH') return await profile(request,db,user)
+      if (path === '/merchant/products' && method === 'POST') return await saveProduct(request,db,user)
       const productId = /^\/merchant\/products\/([\w-]+)$/.exec(path)?.[1]
-      if (productId && method === 'PATCH') return saveProduct(request,db,user,productId)
+      if (productId && method === 'PATCH') return await saveProduct(request,db,user,productId)
       if (productId && method === 'DELETE') {
         const existing = await db.prepare('SELECT id FROM products WHERE id=? AND store_id=?').bind(productId,user.store_id).first()
         if (!existing) return error('המוצר לא נמצא',404)
@@ -290,12 +276,12 @@ export async function onRequest(context: Context): Promise<Response> {
         return json({ok:true})
       }
       const orderId = /^\/merchant\/orders\/([\w-]+)\/status$/.exec(path)?.[1]
-      if (orderId && method === 'PATCH') return orderStatus(request,db,user,orderId)
+      if (orderId && method === 'PATCH') return await orderStatus(request,db,user,orderId)
     }
     if (path.startsWith('/admin/')) {
       if (user.role !== 'admin') return forbidden()
-      if (path === '/admin/overview' && method === 'GET') return adminOverview(db)
-      if (path === '/admin/stores' && method === 'POST') return createStore(request,db,user)
+      if (path === '/admin/overview' && method === 'GET') return await adminOverview(db)
+      if (path === '/admin/stores' && method === 'POST') return await createStore(request,db,user)
       const storeId = /^\/admin\/stores\/([\w-]+)\/status$/.exec(path)?.[1]
       if (storeId && method === 'PATCH') {
         const data = await body(request), status = safeText(data.status,20)
@@ -312,6 +298,7 @@ export async function onRequest(context: Context): Promise<Response> {
     }
     return error('הנתיב לא נמצא',404)
   } catch (cause) {
+    if (cause instanceof AuthError) return error(cause.message,cause.status)
     if (cause instanceof RequestError) return error(cause.message,cause.status)
     if (cause instanceof SyntaxError || cause instanceof Error && /הבקשה גדולה מדי|נתונים לא תקינים/.test(cause.message)) return error('נתונים לא תקינים')
     console.error('API failure',cause)

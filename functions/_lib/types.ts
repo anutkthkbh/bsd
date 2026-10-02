@@ -13,7 +13,12 @@ export interface MediaBucket {
   put(key:string,value:ArrayBuffer | Uint8Array,options?:{httpMetadata?:{contentType:string}}):Promise<unknown>
   get(key:string):Promise<{body:ReadableStream;httpEtag?:string}|null>
 }
-export interface Env { DB?: Database; MEDIA?: MediaBucket }
+export interface Env {
+  DB?: Database; MEDIA?: MediaBucket
+  RESEND_API_KEY?:string; EMAIL_FROM?:string
+  TWILIO_ACCOUNT_SID?:string; TWILIO_AUTH_TOKEN?:string; TWILIO_FROM?:string
+  GOOGLE_CLIENT_ID?:string; GOOGLE_CLIENT_SECRET?:string
+}
 export interface Context {
   request: Request
   env: Env

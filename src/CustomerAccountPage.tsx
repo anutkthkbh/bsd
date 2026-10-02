@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ils, send, type Account, type CustomerAccountData, type Notification, type NotificationsData } from './api'
+import PhoneVerification from './PhoneVerification'
 
 const Arrow = () => <span aria-hidden="true">←</span>
 const storeStatus:Record<string,string>={new:'חדשה',contacted:'נוצר קשר',closed:'נסגרה'}
@@ -118,7 +119,7 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
       <Panel title="אימות החשבון">
         <p className="muted">אימות מייל: <b>{data?.profile?.email_verified?'מאומת':'טרם אומת'}</b></p>
         <p className="muted">אימות טלפון: <b>{data?.profile?.phone_verified?'מאומת':'טרם אומת'}</b></p>
-        <p className="muted">שליחת קוד אימות וכניסה באמצעות Google יופעלו לאחר חיבור ספקי האימות וה־Secrets.</p>
+        <PhoneVerification onVerified={()=>api<CustomerAccountData>('/account').then(next=>{setData(next);setForm({name:next.user.name,phone:next.profile?.phone||''})}).catch(error=>setError(error.message))}/>
       </Panel>
     </div>
 

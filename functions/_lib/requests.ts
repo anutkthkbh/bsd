@@ -1,3 +1,4 @@
+import { phoneNumber } from './auth'
 import type { Database, Statement, User } from './types'
 import { body, error, getUser, json, money, randomId, safeText, sha256 } from './security'
 import { userNotificationStatement } from './notifications'
@@ -78,7 +79,7 @@ export async function submitRequest(request:Request,db:Database,user?:User|null)
   const enteredPhone=safeText(data.customer_phone,35)
   const customer_name=authenticatedCustomer?.name || enteredName
   const customer_email=authenticatedCustomer?.email.toLowerCase() || enteredEmail
-  const customer_phone=safeText(enteredPhone || profile?.phone || '',35)
+  const customer_phone=phoneNumber(enteredPhone || profile?.phone || '')
   const key=safeText(data.idempotency_key,70)
   if (customer_name.length<2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer_email) ||
     !/^[+0-9 ()-]{7,35}$/.test(customer_phone) || !/^[0-9a-f-]{36}$/.test(key) || data.website)
@@ -107,8 +108,9 @@ export async function submitRequest(request:Request,db:Database,user?:User|null)
     VALUES (?,?,?,?,?,?,?,?)`).bind(id,key,request_hash,customer_name,customer_email,customer_phone,basket.total_agorot,authenticatedCustomer?.id||null)]
   if (authenticatedCustomer) {
     statements.push(
-      db.prepare('UPDATE customer_profiles SET phone=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?')
-        .bind(customer_phone,authenticatedCustomer.id),
+      db.prepare('UPDATE customer_profiles SET phone_verified=CASE WHEN phone=? THEN phone_verified ELSE 0 END,phone=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?')
+        .bind(customer_phone,customer_phone,authenticatedCustomer.id),
+      db.prepare("DELETE FROM auth_identities WHERE user_id=? AND provider='sms_code' AND provider_subject<>?").bind(authenticatedCustomer.id,phoneNumber(customer_phone)),
       userNotificationStatement(db,authenticatedCustomer.id,{
         type:'purchase_request.created',
         title:'בקשת הרכישה נשלחה',

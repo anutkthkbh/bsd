@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { readFileSync, readdirSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, pbkdf2Sync } from 'node:crypto'
 import { build } from 'esbuild'
 
 const compiled = await build({entryPoints:['functions/api/[[path]].ts'],bundle:true,platform:'node',format:'esm',write:false})
@@ -46,10 +46,13 @@ async function call(DB,path,{method='GET',body,cookie}={}) {
 
 test('customer account keeps profile and purchase-request history isolated',async()=>{
   const {sql,DB}=database()
-  const registration=await call(DB,'/register',{method:'POST',body:{
-    name:'לקוח בדיקה',email:'buyer@example.com',phone:'050-1234567',password:'very-secure-customer-password',
-  }})
-  assert.equal(registration.status,201)
+  assert.equal((await call(DB,'/register',{method:'POST',body:{name:'לקוח בדיקה',email:'buyer@example.com',password:'very-secure-customer-password'}})).status,403)
+  const legacyId=randomUUID(),salt='local-test-salt'
+  sql.prepare("INSERT INTO users(id,email,name,role,password_salt,password_hash) VALUES (?,?,?,'customer',?,?)").run(legacyId,'buyer@example.com','לקוח בדיקה',salt,pbkdf2Sync('very-secure-customer-password',salt,210000,32,'sha256').toString('hex'))
+  sql.prepare('INSERT INTO customer_profiles(user_id,phone) VALUES (?,?)').run(legacyId,'050-1234567')
+  sql.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_subject) VALUES (?,?,'password',?)").run(randomUUID(),legacyId,'buyer@example.com')
+  const registration=await call(DB,'/login',{method:'POST',body:{email:'buyer@example.com',password:'very-secure-customer-password'}})
+  assert.equal(registration.status,200)
   assert.equal(registration.data.user.role,'customer')
   assert.ok(registration.cookie?.startsWith('madarom_session='))
   assert.equal(sql.prepare("SELECT role FROM users WHERE email='buyer@example.com'").get().role,'customer')
@@ -65,7 +68,7 @@ test('customer account keeps profile and purchase-request history isolated',asyn
   const changed=await call(DB,'/account',{method:'PATCH',cookie:registration.cookie,body:{name:'לקוח מעודכן',phone:'052-7654321'}})
   assert.equal(changed.status,200)
   assert.equal(changed.data.user.name,'לקוח מעודכן')
-  assert.equal(changed.data.profile.phone,'052-7654321')
+  assert.equal(changed.data.profile.phone,'+972527654321')
 
   const storeId=randomUUID(),productId=randomUUID()
   sql.prepare("INSERT INTO stores(id,slug,name,category,status) VALUES (?,?,?,?, 'active')").run(storeId,'history-store','חנות היסטוריה','בית')
@@ -86,7 +89,7 @@ test('customer account keeps profile and purchase-request history isolated',asyn
 
   const account=await call(DB,'/account',{cookie:registration.cookie})
   assert.equal(account.status,200)
-  assert.equal(account.data.profile.phone,'054-1112233')
+  assert.equal(account.data.profile.phone,'+972541112233')
   assert.equal(account.data.requests.length,1)
   assert.equal(account.data.requests[0].total_agorot,8400)
   assert.equal(account.data.requests[0].stores[0].store_name,'חנות היסטוריה')
@@ -95,7 +98,7 @@ test('customer account keeps profile and purchase-request history isolated',asyn
   assert.equal(saved.user_id,registration.data.user.id)
   assert.equal(saved.customer_name,'לקוח מעודכן')
   assert.equal(saved.customer_email,'buyer@example.com')
-  assert.equal(saved.customer_phone,'054-1112233')
+  assert.equal(saved.customer_phone,'+972541112233')
 
   assert.equal((await call(DB,'/merchant/overview',{cookie:registration.cookie})).status,403)
   assert.equal((await call(DB,'/admin/overview',{cookie:registration.cookie})).status,403)
@@ -103,7 +106,7 @@ test('customer account keeps profile and purchase-request history isolated',asyn
   const duplicate=await call(DB,'/register',{method:'POST',body:{
     name:'לקוח אחר',email:'buyer@example.com',password:'another-secure-customer-password',
   }})
-  assert.equal(duplicate.status,409)
+  assert.equal(duplicate.status,403)
 
   const login=await call(DB,'/login',{method:'POST',body:{email:'buyer@example.com',password:'very-secure-customer-password'}})
   assert.equal(login.status,200)
