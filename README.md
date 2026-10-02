@@ -1,6 +1,6 @@
 # מדרום
 
-מערכת קניון דיגיטלי מבוססת React, TypeScript, Cloudflare Pages Functions ו־D1.
+מערכת קניון דיגיטלי מבוססת React, TypeScript, Cloudflare Workers ו־D1, עם API שנבנה מ־Pages Functions.
 
 ## מצב נוכחי
 
@@ -9,11 +9,12 @@
 ### חשבונות והרשאות
 
 - כניסה אחידה למנהל, סוחר ולקוח.
-- הרשמת לקוחות עם מייל וסיסמה.
+- הרשמת לקוחות עם קוד אימות למייל או Google.
+- כניסה ב־SMS למספר שאומת בחשבון; כניסה עם סיסמה קיימת נשמרה.
 - session cookie מאובטח.
 - ניתוב אוטומטי לאזור המתאים לפי role.
 - אזור לקוח עם עריכת שם וטלפון, היסטוריית בקשות רכישה והתראות פנימיות.
-- תשתית DB מוכנה להרחבה ל־Google, קוד חד־פעמי במייל ו־SMS לאחר חיבור ספקים ו־Secrets.
+- Google OAuth עם state ו־PKCE, קוד חד־פעמי במייל דרך Resend וב־SMS דרך Twilio. השיטות זמינות רק אחרי חיבור הספקים; ראו `AUTH_SETUP.md`.
 
 ### בקשות רכישה
 
@@ -44,9 +45,19 @@ npm run build
 
 GitHub Actions מריץ את שלוש הבדיקות אוטומטית בענפי `feature/**`, ב־Pull Requests וב־`main`. אבן הדרך של חשבונות לקוח וההתראות עברה TypeScript, בדיקות API ו־production build בענף הפיתוח.
 
-## Cloudflare
+## Cloudflare Workers
 
-יש להגדיר D1 binding בשם `DB` ולהריץ את כל קבצי `migrations/` לפי הסדר. עבור העלאת מדיה יש להגדיר R2 binding בשם `MEDIA`.
+הגדרות ה־Worker ששמואל הוסיף נשמרו ב־`wrangler.jsonc`: השם `bsda`, נכסים סטטיים ב־`dist` ו־API תחת `/api/*`. `npm run build` בונה את אתר React ואת ה־Worker ב־`worker/index.js`. בפריסת Git יש להגדיר Build command: `npm run build`, ו־Deploy command: `npm run deploy`.
+
+ה־D1 מוגדר כ־`DB`. לפני מיגרציה מרוחקת יש לבדוק שזה המסד המיועד למדרום; ההגדרה הנוכחית מפנה ל־`shmuelnode-db`, כפי שהוגדר בעדכון הידני. לאחר אימות המסד, יש להריץ `npx wrangler d1 migrations apply DB --remote` עד מיגרציה 0008. עבור העלאת מדיה יש להגדיר R2 binding בשם `MEDIA`; קישורי תמונות HTTPS עובדים גם בלעדיו.
+
+`npm run deploy` דורש חשבון Cloudflare מחובר. הבנייה והמיגרציות נבדקו מקומית; פריסה חיה וספקי האימות לא אומתו בסביבה זו.
+
+## תוכן ועיצוב
+
+האתר מיועד לקונים: אין כפתורי הצטרפות חנויות, איורי מוצרים או נתוני קטלוג דמה. נתונים חסרים מוצגים כמצב ריק, ותקלה בטעינת נתונים מוצגת עם אפשרות ניסיון נוסף. תמונות המוצרים והחנויות מגיעות מהנתונים שהועלו. צילום האווירה בדף הבית הוא צילום כללי ואינו מציג חנות מסוימת במערכת.
+
+צילום האווירה: [Tan Tony / Unsplash](https://unsplash.com/photos/cozy-shop-interior-with-woven-lamps-and-shelves-n83UOvQbbcI), ברישיון Unsplash.
 
 ## אבטחה
 
