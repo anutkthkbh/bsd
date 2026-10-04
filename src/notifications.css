@@ -1,7 +1,7 @@
 .notification-center{position:relative;display:flex;align-items:center}
 .notification-trigger{border:1px solid transparent;border-radius:50%}
 .notification-trigger:hover{background:#ece8df;border-color:var(--line)}
-.notification-trigger>span:first-child{font-size:1.45rem;line-height:1;transform:rotate(45deg)}
+.notification-trigger>svg{display:block}
 .notification-count{position:absolute;top:-2px;left:-2px;min-width:18px;height:18px;padding:0 4px;border-radius:20px;background:var(--clay);color:#fff;font-size:.62rem;display:grid;place-items:center;font-weight:700}
 .notification-popover{position:absolute;top:calc(100% + 13px);left:0;width:min(390px,calc(100vw - 24px));max-height:min(520px,70vh);overflow:hidden;background:#fffdf8;border:1px solid var(--line);box-shadow:0 18px 48px #17201c26;z-index:70;text-align:right}
 .notification-head{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:18px;border-bottom:1px solid var(--line)}

@@ -66,7 +66,7 @@ export default function NotificationCenter({user}:{user:Account|null}) {
 
   return <div className="notification-center" ref={rootRef}>
     <button type="button" className="icon-button notification-trigger" aria-label={data.unread?`התראות, ${data.unread} לא נקראו`:'התראות'} aria-haspopup="dialog" aria-expanded={open} onClick={()=>setOpen(value=>!value)}>
-      <span aria-hidden="true">♢</span>{data.unread>0&&<span className="notification-count">{data.unread>99?'99+':data.unread}</span>}
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16Z"/><path d="M10 21h4"/></svg>{data.unread>0&&<span className="notification-count">{data.unread>99?'99+':data.unread}</span>}
     </button>
     {open&&<section className="notification-popover" role="dialog" aria-label="התראות">
       <div className="notification-head"><div><small>מרכז עדכונים</small><strong>התראות</strong></div>{data.unread>0&&<button type="button" className="text-button" onClick={markAll}>סימון הכול כנקרא</button>}</div>

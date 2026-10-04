@@ -117,9 +117,7 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
         </form>
       </Panel>
       <Panel title="אימות החשבון">
-        <p className="muted">אימות מייל: <b>{data?.profile?.email_verified?'מאומת':'טרם אומת'}</b></p>
-        <p className="muted">אימות טלפון: <b>{data?.profile?.phone_verified?'מאומת':'טרם אומת'}</b></p>
-        <PhoneVerification onVerified={()=>api<CustomerAccountData>('/account').then(next=>{setData(next);setForm({name:next.user.name,phone:next.profile?.phone||''})}).catch(error=>setError(error.message))}/>
+        <PhoneVerification emailVerified={!!data?.profile?.email_verified} phoneVerified={!!data?.profile?.phone_verified} defaultPhone={data?.profile?.phone||''} onVerified={()=>api<CustomerAccountData>('/account').then(next=>{setData(next);setForm({name:next.user.name,phone:next.profile?.phone||''})}).catch(error=>setError(error.message))}/>
       </Panel>
     </div>
 
