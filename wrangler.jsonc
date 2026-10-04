@@ -3,6 +3,12 @@
   "name": "bsda",
   "main": "./worker/index.js",
   "compatibility_date": "2026-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "keep_vars": true,
+  "vars": {
+    "GOOGLE_CLIENT_ID": "890866755716-1qn066hafgvr4hphv14n7fej9slmmtqc.apps.googleusercontent.com",
+    "SMS_WORKER_URL": "https://flash-sms.shmuelilani14789.workers.dev"
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
@@ -12,8 +18,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "shmuelnode-db",
-      "database_id": "c9201b34-d2be-4c95-b981-09ae567c072b"
+      "database_id": "99c74b64-0934-4c37-8133-fc8cf45ee92f"
     }
   ],
   "observability": {

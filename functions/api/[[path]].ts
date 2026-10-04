@@ -3,7 +3,8 @@ import { body, error, getUser, json, money, passwordHash, randomId, randomToken,
 import { customerRequests, merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
 import { getMedia, uploadMedia } from '../_lib/media'
 import { markAllNotificationsRead, markNotificationRead, notificationResponse } from '../_lib/notifications'
-import { AuthError, authCapabilities, googleCallback, googleStart, phoneNumber, requestCode, verifyCode } from '../_lib/auth'
+import { AuthError, authCapabilities, googleCallback, googleStart, googleIdentityStart, googleIdentityVerify, phoneNumber, requestCode, verifyCode } from '../_lib/auth'
+import { schemaReady, schemaFailure } from '../_lib/schema'
 
 type Row = Record<string, unknown>
 const values = <T>(query: Promise<{results:T[]}>) => query.then(result => result.results)
@@ -49,11 +50,12 @@ async function login(request: Request, db: Database) {
 }
 
 async function customerAccount(db:Database,user:User) {
-  const [profile,requests] = await Promise.all([
+  const [profile,requests,googleIdentity] = await Promise.all([
     db.prepare('SELECT phone,email_verified,phone_verified,updated_at FROM customer_profiles WHERE user_id=?').bind(user.id).first<Row>(),
     customerRequests(db,user.id),
+    db.prepare("SELECT id FROM auth_identities WHERE user_id=? AND provider='google' LIMIT 1").bind(user.id).first<Row>(),
   ])
-  return json({user,profile,requests})
+  return json({user,profile,requests,google_linked:!!googleIdentity})
 }
 
 async function updateCustomerAccount(request:Request,db:Database,user:User) {
@@ -211,9 +213,11 @@ export async function onRequest(context: Context): Promise<Response> {
   if (method !== 'GET' && !sameOrigin(request)) return forbidden()
   try {
     if (path === '/auth/capabilities' && method === 'GET') {
-      try {await db.prepare('SELECT salt FROM verification_challenges LIMIT 1').first();return json(await authCapabilities(context.env))}
-      catch {return json({email:false,sms:false,google:false,setup_required:true})}
+      const ready=await schemaReady(db,'auth')&&await schemaReady(db,'accounts')
+      return json(ready?await authCapabilities(context.env):{email:false,sms:false,google:false,setup_required:true})
     }
+    if (path === '/auth/google/identity/start' && method === 'GET') return await googleIdentityStart(request,db,context.env)
+    if (path === '/auth/google/identity/verify' && method === 'POST') return await googleIdentityVerify(request,db,context.env)
     if (path === '/auth/request-code' && method === 'POST') return await requestCode(request,db,context.env)
     if (path === '/auth/verify-code' && method === 'POST') return await verifyCode(request,db)
     if (path === '/auth/google/start' && method === 'GET') return await googleStart(request,db,context.env)
@@ -221,7 +225,11 @@ export async function onRequest(context: Context): Promise<Response> {
       try {return await googleCallback(request,db,context.env)}
       catch {return new Response(null,{status:302,headers:{location:'/login?error=google','cache-control':'no-store'}})}
     }
-    if (path === '/health' && method === 'GET') { await db.prepare('SELECT 1').first(); return json({ok:true,purchase_requests_ready:await requestsReady(db)}) }
+    if (path === '/health' && method === 'GET') {
+      const [catalog,accounts,auth,requests]=await Promise.all([schemaReady(db,'catalog'),schemaReady(db,'accounts'),schemaReady(db,'auth'),requestsReady(db)])
+      const ready=catalog&&accounts&&auth&&requests
+      return json({ok:ready,catalog_ready:catalog,accounts_ready:accounts,auth_ready:auth,purchase_requests_ready:requests,setup_required:!ready},ready?200:503)
+    }
     if (path === '/catalog' && method === 'GET') return await catalog(db)
     if (path.startsWith('/media/') && method === 'GET') return await getMedia(context.env.MEDIA,path.slice('/media/'.length))
     if ((path === '/checkout/quote' || path === '/purchase-requests') && !await requestsReady(db))
@@ -301,6 +309,10 @@ export async function onRequest(context: Context): Promise<Response> {
     if (cause instanceof AuthError) return error(cause.message,cause.status)
     if (cause instanceof RequestError) return error(cause.message,cause.status)
     if (cause instanceof SyntaxError || cause instanceof Error && /הבקשה גדולה מדי|נתונים לא תקינים/.test(cause.message)) return error('נתונים לא תקינים')
+    if (schemaFailure(cause)) {
+      console.error('Madarom database schema is not ready')
+      return json({error:'המערכת אינה זמינה כרגע. צוות האתר צריך להשלים את ההפעלה',code:'DATABASE_SETUP_REQUIRED'},503)
+    }
     console.error('API failure',cause)
     return error('תקלה זמנית. נסו שוב בעוד רגע',500)
   }

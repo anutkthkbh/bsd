@@ -7,7 +7,7 @@ export interface Product {
   store_name?: string; store_slug?: string; selected_variant?: string
 }
 export interface Account { id:string; email:string; name:string; role:'admin'|'merchant'|'customer'; store_id:string|null }
-export interface AuthCapabilities { email:boolean; sms:boolean; google:boolean; setup_required?:boolean }
+export interface AuthCapabilities { email:boolean; sms:boolean; google:boolean; google_mode?:'identity'; setup_required?:boolean }
 export interface CustomerProfile { phone:string; email_verified:number; phone_verified:number; updated_at?:string }
 export interface CustomerRequestItem {
   store_request_id:string; product_id:string; product_name:string; variant:string; quantity:number; unit_price_agorot:number
@@ -19,7 +19,7 @@ export interface CustomerStoreRequest {
 export interface CustomerPurchaseRequest {
   id:string; status:'open'|'closed'; total_agorot:number; created_at:string; stores:CustomerStoreRequest[]
 }
-export interface CustomerAccountData { user:Account; profile:CustomerProfile|null; requests:CustomerPurchaseRequest[] }
+export interface CustomerAccountData { user:Account; profile:CustomerProfile|null; requests:CustomerPurchaseRequest[]; google_linked:boolean }
 export interface Notification {
   id:string; type:string; title:string; message:string; target_url:string; read_at:string|null; created_at:string
 }
