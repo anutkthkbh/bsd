@@ -1,52 +1,61 @@
-# הפעלת הכניסה למדרום
+# הכניסה למדרום וחיבור הספקים הקיימים
 
-הקוד כולל כניסה והרשמה עם Google וקוד חד־פעמי במייל, וכניסה עם SMS למספר שאומת בחשבון. כל משתמש מופנה לפי התפקיד שהוגדר בשרת: לקוח ל־`/account`, סוחר ל־`/merchant` ומנהל ל־`/admin`. הרשמה ציבורית יוצרת לקוח בלבד.
+כל שיטות הכניסה משתמשות באותו `users.id` ובאותה עוגיית session. התפקיד נקבע בשרת: לקוח ל־`/account`, סוחר ל־`/merchant`, מנהל ל־`/admin`. הרשמה ציבורית יוצרת לקוח בלבד. מספר טלפון שהוקלד בפרופיל אינו זהות מאומתת.
 
-## מסד נתונים
+## מסד הנתונים והפריסה
 
-יש להחיל את המיגרציות עד `0008_provider_auth.sql`. אין למחוק נתונים קיימים או להריץ את קבצי ה־SQL שוב ידנית; Wrangler מנהל את היסטוריית המיגרציות. לפני הרצה מרוחקת יש לוודא שה־D1 המוגדר ב־`wrangler.jsonc` הוא המסד המיועד למדרום.
+בבדיקה החיה מ־4 באוקטובר 2026, `/api/catalog` החזיר 500, `/api/auth/capabilities` החזיר `setup_required: true`, ובקשות הרכישה לא היו מוכנות. זה מצביע על סכמה חסרה או לא תואמת, אך אינו מוכיח שהמסד ריק. ה־binding הנוכחי מפנה ל־`shmuelnode-db`, מסד שמשמש גם פרויקט אחר בהיסטוריה. יש לבדוק אותו בקריאה בלבד ולצפות בלוגים לפני שינוי.
+
+אין להריץ עליו את שמונה המיגרציות ללא בדיקה: מיגרציה 0005 משנה את טבלאות `users` ו־`sessions`. הפתרון למסד של פרויקט אחר הוא D1 ייעודי, למשל `madarom-prod`, ושחזור נתוני מדרום ממקור מאומת. אין לייבא קטלוגי דוגמה או את קובץ ה־JSON הישן בלי לוודא שזה תוכן אמיתי.
+
+`npm run deploy` בודק את שמות הטבלאות ועמודות הליבה לפני מיגרציה, מסרב למסד זר או לא תואם, מחיל מיגרציות ממתינות דרך Wrangler ורק אז פורס. הוא דורש שם ייעודי למדרום וחוסם תמיד את ה־ID של המסד המשותף הנוכחי. ניתן להעביר `--config` נפרד. מסד חדש דורש ID אמיתי בקובץ ההגדרות. שינוי הגדרות וסודות דרך לוח Cloudflare נשמר בפריסה באמצעות `keep_vars`.
 
 ```bash
-npx wrangler d1 migrations apply DB --remote
+npm ci
+npm run check
+npm test
+npm run build
+npm run deploy
 ```
 
-## מייל — Resend
+יש להשתמש ב־Deploy command `npm run deploy` בפריסת Git כדי להפעיל את בדיקת המסד. `npx wrangler deploy` ישירות עוקף את בדיקת המיגרציות של הפרויקט.
 
-יש לחבר דומיין שולח מאומת ב־Resend, ולהגדיר ב־Cloudflare Worker:
+## Google Identity Services — החיבור המקורי
 
-- `RESEND_API_KEY` — Secret.
-- `EMAIL_FROM` — כתובת שולח בדומיין המאומת.
+ההיסטוריה מתעדת כניסה עם `GOOGLE_CLIENT_ID` בלבד. ה־Client ID הציבורי שנמצא בקובץ `Madarom-root.env` נשמר ב־`wrangler.jsonc`. אין צורך ב־Client Secret עבור התהליך הזה.
 
-המערכת שולחת הודעת טקסט עם קוד בן שש ספרות דרך API של Resend. אין שליחת קוד לדפדפן או החזרת קוד ב־API.
+ב־Google Cloud יש לוודא שה־Web Client מאפשר ב־Authorized JavaScript origins את הדומיין שבו האתר פועל, למשל `https://bsda.shmuelilani14789.workers.dev`. אין להוסיף נתיב ל־origin. כאשר מחברים דומיין חדש יש להוסיף גם אותו. Client ID תקין לא מוכיח שה־origin החדש אושר אצל Google.
 
-## SMS — Twilio
+הדפדפן טוען את הספרייה הרשמית, והשרת בודק את חתימת ID token מול מפתחות Google, `aud`, `iss`, `exp`, `iat` ו־nonce הקשור לעוגייה ולרשומת אימות חד־פעמית. מזהה `sub` משייך את הזהות למשתמש. אימות Gmail מאפשר הרשמה ישירה; כתובת שאינה Gmail דורשת תחילה הוכחת בעלות במייל או כניסה קיימת ואז חיבור Google מתוך החשבון. מנגנון OAuth code עם PKCE נשמר לתאימות, ודורש גם `GOOGLE_CLIENT_SECRET` ו־redirect URI מתאים.
 
-יש להגדיר:
+## SMS — ה־Worker המקורי flash-sms
 
-- `TWILIO_ACCOUNT_SID`.
-- `TWILIO_AUTH_TOKEN` — Secret.
-- `TWILIO_FROM` — מספר שולח SMS מורשה בפורמט בינלאומי.
+הספק שתועד כעובד היה `https://flash-sms.shmuelilani14789.workers.dev`. הקוד שוב תומך בשמות ובפורמט המקוריים:
 
-מספר ישראלי בפורמט `05xxxxxxxx` מומר ל־`+9725xxxxxxxx`. משתמש נרשם תחילה במייל או Google, ואז מאמת את מספר הטלפון מתוך האזור האישי. סוחר ומנהל יכולים לאמת טלפון מתוך דף הניהול שלהם. מספר שהוקלד בפרופיל ללא אימות אינו מאפשר כניסה. שינוי המספר מסיר את שיוך הכניסה הקודם ודורש אימות חדש.
+- `SMS_WORKER_URL` — מוגדר בקובץ Wrangler.
+- `SMS_WORKER_SECRET` — Secret ב־Worker `bsda`; עליו להתאים לסוד שקיים בספק ה־SMS.
+- נשלח POST עם `{ phone, secret, message, count: 1 }`. המספר נשלח בפורמט בינלאומי, בהתאם למתאם המקורי; נדרשת תשובת JSON עם `success` חיובי לפני שמודיעים שנשלח קוד.
 
-## Google
+הסוד נשלח מהשרת בלבד, אינו מוחזר לדפדפן ואינו נשמר בגיטהאב. אם הוגדר הספק המקורי, הוא נבחר לפני Twilio. אין ניסיון שליחה לספק נוסף במקרה כשל, כדי להימנע מהודעות כפולות. Twilio עדיין נתמך למי שהגדיר `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`.
 
-יש ליצור OAuth Client מסוג Web application ולהגדיר:
+משתמש נרשם במייל או Google ומאמת את הטלפון מתוך האזור האישי. סוחר ומנהל מאמתים מתוך הניהול. שינוי המספר מבטל את שיוך הכניסה הקודם. אין לשלוח SMS אמיתי בבדיקות אוטומטיות או להשתמש בנמען בלי הרשאה.
 
-- `GOOGLE_CLIENT_ID`.
-- `GOOGLE_CLIENT_SECRET` — Secret.
-- Authorized redirect URI: `https://YOUR-LIVE-DOMAIN/api/auth/google/callback`.
+## מייל — SMTP ההיסטורי או Resend
 
-יש לרשום את הדומיין שבו המשתמשים ייכנסו בפועל. הגדרת OAuth כוללת מסך הסכמה, scopes של `openid email profile`, והפעלה לקהל המתאים בחשבון Google Cloud.
+קובצי `.env`, `.env.integrated`, `Madarom-root.env` והערכה ההיסטורית שנבדקו אינם מכילים ספק SMTP פעיל. מיילי הפיתוח נשמרו ל־`emailOutbox`; זו לא שליחת מייל אמיתית. אין להחזיר מנגנון זה בייצור או להציג הודעת הצלחה בלי ספק ששלח את ההודעה.
 
-תהליך הכניסה בודק state עם cookie, משתמש ב־PKCE, מחליף code בצד השרת ומקבל פרופיל מאומת דרך Google userinfo. כתובת Gmail מאפשרת כניסה והרשמה ישירות. כתובת Google בדומיין אחר דורשת כניסה ראשונית בקוד למייל ואז לחיצה על „חיבור Google לחשבון” מתוך החשבון עם אותה כתובת מייל. כניסות Google הבאות משתמשות בזהות Google שנקשרה לחשבון, ולא במייל כמזהה. כניסה מאומתת למייל של הרשמת סיסמה ישנה שטרם אומתה מבטלת את האישורים וה־sessions הישנים.
+תמיכה ב־SMTP נוספה בהתאם לשמות הישנים:
 
-## בדיקה אחרי ההגדרה
+- `SMTP_HOST`, `SMTP_PORT` — 465 ל־TLS מההתחלה או 587 ל־STARTTLS חובה.
+- `SMTP_USER`, `SMTP_PASS` — אישורי ספק אמיתיים, כסודות ב־Cloudflare.
+- `SMTP_FROM` — שולח מאומת אצל הספק. `SMTP_SECURE` נשמר כשם היסטורי; התעבורה מאובטחת לפי הפורט ואי אפשר לכבות TLS.
 
-`GET /api/auth/capabilities` מציג אילו שיטות מוגדרות. זו בדיקת הגדרות בלבד, ואינה מוכיחה שהספק יכול לשלוח הודעה או שה־OAuth Client תקין. יש לבצע בפועל הרשמה במייל, קבלת SMS וכניסה עם Google בדומיין החי, וכן לבדוק כניסת לקוח, סוחר ומנהל.
+לחלופין, Resend ממשיך לעבוד עם `RESEND_API_KEY` ו־`EMAIL_FROM`. SMTP מלא נבחר לפני Resend. אין fallback שקט בין ספקים בזמן משלוח.
 
-קוד בתוקף עשר דקות וניתן לשימוש פעם אחת. אחרי חמישה ניסיונות שגויים הוא ננעל. שליחה נוספת דורשת המתנה של דקה; משלוחים מוגבלים לפי יעד וכתובת IP. ה־session נשמר ב־HttpOnly cookie למשך שבעה ימים. הרשמה חדשה עם סיסמה ללא אימות חסומה; סיסמאות קיימות ממשיכות לאפשר כניסה.
+## אימות ההפעלה
 
-בדיקות ה־API המקומיות משתמשות בספקים מדומים בתוך קבצי הבדיקה בלבד. הן אינן מוכיחות שליחת הודעות אמיתית. כל נתוני החנות ביישום מגיעים מ־D1, ואין קטלוג דמה במערכת.
+`GET /api/health` בודק סכמות קטלוג, חשבונות, אימות ובקשות רכישה. כשאחד מהם חסר הוא מחזיר 503 עם `setup_required`, במקום הצלחה מטעה של `SELECT 1`. `GET /api/auth/capabilities` מציג זמינות לפי סכמה והגדרות; הוא אינו מוכיח משלוח אמיתי או origin מורשה ב־Google.
 
-מקורות הטמעה: [Google ownership verification](https://developers.google.com/identity/gsi/web/guides/verify-google-id-token), [Google OIDC](https://developers.google.com/identity/openid-connect/openid-connect), [Google OAuth](https://developers.google.com/identity/protocols/oauth2/web-server), [Resend Send Email](https://resend.com/docs/api-reference/emails/send-email), [Twilio Messages](https://www.twilio.com/docs/messaging/api/message-resource).
+יש לבדוק באתר החי כניסה עם Google, קוד במייל, אימות טלפון וכניסה עם SMS; לקוח, סוחר ומנהל; קטלוג עם חנויות ומוצרים אמיתיים. קודים תקפים עשר דקות, חד־פעמיים, ננעלים אחרי חמישה ניסיונות שגויים ומוגבלים לפי יעד ו־IP. בדיקות מקומיות מדמות את הספקים בלבד ואינן שולחות הודעות אמיתיות.
+
+מקורות: [אימות Google](https://developers.google.com/identity/gsi/web/guides/verify-google-id-token), [TLS ב־Workers](https://developers.cloudflare.com/workers/runtime-apis/nodejs/tls/), [SMTP](https://nodemailer.com/smtp), [מיגרציות D1](https://developers.cloudflare.com/d1/reference/migrations/).

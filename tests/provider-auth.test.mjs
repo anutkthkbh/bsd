@@ -4,9 +4,17 @@ import { DatabaseSync } from 'node:sqlite'
 import { readFileSync, readdirSync } from 'node:fs'
 import { randomUUID, pbkdf2Sync } from 'node:crypto'
 import { build } from 'esbuild'
+import { exportJWK, generateKeyPair, SignJWT } from 'jose'
 
-const compiled = await build({entryPoints:['functions/api/[[path]].ts'],bundle:true,platform:'node',format:'esm',write:false})
+const compiled = await build({entryPoints:['functions/api/[[path]].ts'],bundle:true,platform:'node',format:'esm',write:false,
+  plugins:[{name:'test-smtp',setup(builder){
+    builder.onResolve({filter:/^nodemailer$/},()=>({path:'test-smtp',namespace:'test'}))
+    builder.onLoad({filter:/.*/,namespace:'test'},()=>({contents:`export default {createTransport(options){
+      return {sendMail(message){return globalThis.__testSmtp(options,message)},close(){}}
+    }}`,loader:'js'}))
+  }}]})
 const {onRequest} = await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'))
+const signing=await generateKeyPair('RS256'),publicJwk={...await exportJWK(signing.publicKey),kid:'test-rsa',alg:'RS256',use:'sig'}
 
 function database() {
   const sql = new DatabaseSync(':memory:')
@@ -216,4 +224,94 @@ test('external Google email requires authenticated linking before access to staf
   assert.equal(sql.prepare("SELECT user_id FROM auth_identities WHERE provider='google'").get().user_id,id)
   const returning=await start()
   assert.equal((await call(DB,`/auth/google/callback?state=${returning.state}&code=test`,{env:providers,cookie:returning.response.cookie})).headers.get('location'),'https://madarom.example/admin')
+})
+
+test('original flash-sms provider delivers a private OTP and rejects failed delivery',async t=>{
+  const {sql,DB}=database(),messages=delivery(t)
+  const account=await emailAccount(DB,messages)
+  const worker={SMS_WORKER_URL:'https://flash-sms.shmuelilani14789.workers.dev',SMS_WORKER_SECRET:'test-secret'}
+  const captured=[]
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    assert.equal(String(url),new URL(worker.SMS_WORKER_URL).href)
+    captured.push(JSON.parse(options.body))
+    return captured.length===1?Response.json({success:true}):captured.length===2?Response.json({success:false}):Response.json({})
+  })
+  const cap=await call(DB,'/auth/capabilities',{env:worker})
+  assert.equal(cap.data.sms,true)
+  const sent=await call(DB,'/auth/request-code',{method:'POST',cookie:account.cookie,env:worker,
+    body:{channel:'sms',target:'0501234567',purpose:'verify'}})
+  assert.equal(sent.status,201)
+  assert.equal(captured[0].phone,'+972501234567');assert.equal(captured[0].secret,'test-secret');assert.equal(captured[0].count,1)
+  assert.equal(JSON.stringify(sent.data).includes('test-secret'),false)
+  const verified=await call(DB,'/auth/verify-code',{method:'POST',cookie:account.cookie,
+    body:{challenge_id:sent.data.challenge_id,code:captured[0].message.match(/\b\d{6}\b/)[0]}})
+  assert.equal(verified.status,200)
+  const rejected=await call(DB,'/auth/request-code',{method:'POST',cookie:account.cookie,env:worker,
+    body:{channel:'sms',target:'0501234568',purpose:'verify'}})
+  assert.equal(rejected.status,503)
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM verification_challenges WHERE target='+972501234568'").get().n,0)
+  const missingSuccess=await call(DB,'/auth/request-code',{method:'POST',cookie:account.cookie,env:worker,
+    body:{channel:'sms',target:'0501234569',purpose:'verify'}})
+  assert.equal(missingSuccess.status,503)
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM verification_challenges WHERE target='+972501234569'").get().n,0)
+})
+
+test('Google Identity restores Client ID sign-in with JWT signature, audience, nonce, expiry and role checks',async t=>{
+  const {sql,DB}=database(),env={GOOGLE_CLIENT_ID:'test-gis-client'}
+  t.mock.method(globalThis,'fetch',async url=>{
+    assert.equal(String(url),'https://www.googleapis.com/oauth2/v3/certs')
+    return Response.json({keys:[publicJwk]},{headers:{'cache-control':'public,max-age=3600'}})
+  })
+  const cap=await call(DB,'/auth/capabilities',{env})
+  assert.equal(cap.data.google,true);assert.equal(cap.data.google_mode,'identity')
+  const sign=async(nonce,overrides={},key=signing.privateKey)=>new SignJWT({email:'identity@gmail.com',email_verified:true,name:'לקוח',nonce,...overrides})
+    .setProtectedHeader({alg:'RS256',kid:'test-rsa'}).setIssuer('https://accounts.google.com').setAudience(overrides.aud||env.GOOGLE_CLIENT_ID)
+    .setSubject('identity-subject').setIssuedAt().setExpirationTime(overrides.exp||'5m').sign(key)
+  const start=()=>call(DB,'/auth/google/identity/start',{env})
+  const verify=(initial,credential,cookie=initial.cookie)=>call(DB,'/auth/google/identity/verify',{method:'POST',cookie,env,body:{credential}})
+  const initial=await start(),token=await sign(initial.data.nonce)
+  assert.equal((await verify(initial,token,'')).status,401)
+  assert.equal((await verify(initial,await sign('wrong-nonce'))).status,401)
+  assert.equal((await verify(initial,await sign(initial.data.nonce,{aud:'another-app'}))).status,401)
+  assert.equal((await verify(initial,await sign(initial.data.nonce,{exp:Math.floor(Date.now()/1000)-60}))).status,401)
+  const attacker=await generateKeyPair('RS256')
+  assert.equal((await verify(initial,await sign(initial.data.nonce,{},attacker.privateKey))).status,401)
+  const done=await verify(initial,token)
+  assert.equal(done.status,200);assert.equal(done.data.redirect,'/account');assert.equal(done.data.user.role,'customer')
+  assert.equal((await verify(initial,token)).status,401)
+  assert.equal((await call(DB,'/session',{cookie:done.cookie})).data.user.id,done.data.user.id)
+  sql.prepare("UPDATE users SET role='admin' WHERE id=?").run(done.data.user.id)
+  const returning=await start(),again=await verify(returning,await sign(returning.data.nonce))
+  assert.equal(again.data.redirect,'/admin');assert.equal(again.data.user.id,done.data.user.id)
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM users WHERE email='identity@gmail.com'").get().n,1)
+})
+
+test('database readiness detects missing migration tables and catalog returns an actionable 503',async()=>{
+  const {sql,DB}=database()
+  assert.equal((await call(DB,'/health')).data.ok,true)
+  sql.exec('DROP TABLE oauth_states')
+  assert.equal((await call(DB,'/auth/capabilities',{env:providers})).data.setup_required,true)
+  const health=await call(DB,'/health');assert.equal(health.status,503);assert.equal(health.data.auth_ready,false)
+  const missing={prepare(){throw new Error('D1_ERROR: no such table: stores')}}
+  const catalog=await call(missing,'/catalog');assert.equal(catalog.status,503);assert.equal(catalog.data.code,'DATABASE_SETUP_REQUIRED')
+})
+
+test('SMTP uses the historical settings, requires TLS and never succeeds on rejected delivery',async t=>{
+  const {sql,DB}=database(),env={SMTP_HOST:'smtp.example.com',SMTP_PORT:'587',SMTP_USER:'test-user',SMTP_PASS:'test-password',SMTP_FROM:'test@example.com'}
+  let reject=false,captured
+  globalThis.__testSmtp=async(options,message)=>{
+    assert.equal(options.requireTLS,true);assert.equal(options.secure,false)
+    assert.equal(options.auth.user,'test-user');assert.equal(options.auth.pass,'test-password')
+    captured=message
+    return {accepted:reject?[]:[message.to]}
+  }
+  t.after(()=>{delete globalThis.__testSmtp})
+  const cap=await call(DB,'/auth/capabilities',{env});assert.equal(cap.data.email,true)
+  assert.equal((await call(DB,'/auth/capabilities',{env:{...env,SMTP_PORT:'25'}})).data.email,false)
+  const sent=await call(DB,'/auth/request-code',{method:'POST',env,body:{channel:'email',target:'smtp-buyer@example.com',name:'לקוח'}})
+  assert.equal(sent.status,201);assert.equal(captured.to,'smtp-buyer@example.com')
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:sent.data.challenge_id,code:captured.text.match(/\b\d{6}\b/)[0]}})).status,200)
+  reject=true
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env,body:{channel:'email',target:'rejected@example.com',name:'לקוח'}})).status,503)
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM verification_challenges WHERE target='rejected@example.com'").get().n,0)
 })

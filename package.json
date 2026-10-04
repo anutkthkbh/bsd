@@ -6,20 +6,24 @@
   "scripts": {
     "dev": "vite",
     "build:web": "vite build",
-    "build:functions": "wrangler pages functions build --outdir=./worker/",
+    "build:functions": "wrangler pages functions build --outdir=./worker/ --compatibility-date=2026-09-23 --compatibility-flags=nodejs_compat",
     "build": "npm run build:web && node scripts/prepare-worker-build.mjs && npm run build:functions",
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/deploy.mjs",
     "preview": "vite preview",
     "check": "tsc --noEmit",
     "admin:create": "node scripts/create-admin.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
+    "jose": "^6.2.12",
+    "nodemailer": "^10.0.14",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.1.0",

@@ -1,5 +1,7 @@
 import type { Database, Env, User } from './types'
 import { body, error, json, randomId, randomToken, safeText, sha256, getUser } from './security'
+import { deliverCode, providerConfiguration } from './providers'
+import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose'
 
 export class AuthError extends Error {
   constructor(message:string, public status=400) {super(message)}
@@ -22,23 +24,48 @@ async function issueSession(request:Request,db:Database,user:User) {
   return {user,sessionCookie:cookie(request,'madarom_session',token,604800)}
 }
 export async function authCapabilities(env:Env) {
-  return {email:!!(env.RESEND_API_KEY&&env.EMAIL_FROM),sms:!!(env.TWILIO_ACCOUNT_SID&&env.TWILIO_AUTH_TOKEN&&env.TWILIO_FROM),
-    google:!!(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET)}
+  const configured=providerConfiguration(env)
+  return {email:!!configured.email,sms:!!configured.sms,google:!!env.GOOGLE_CLIENT_ID,
+    ...(env.GOOGLE_CLIENT_ID?{google_mode:'identity' as const}:{})}
 }
 
-async function deliverCode(env:Env,channel:'email'|'sms',target:string,code:string) {
-  let response:Response
-  if (channel==='email') {
-    response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{authorization:`Bearer ${env.RESEND_API_KEY}`,'content-type':'application/json'},
-      body:JSON.stringify({from:env.EMAIL_FROM,to:[target],subject:'קוד הכניסה למדרום',
-        text:`קוד הכניסה שלך למדרום: ${code}\nהקוד בתוקף ל־10 דקות. אם לא ביקשת כניסה, אפשר להתעלם מההודעה.`})})
-  } else {
-    const data=new URLSearchParams({To:target,From:env.TWILIO_FROM!,Body:`קוד הכניסה למדרום: ${code}. הקוד בתוקף ל-10 דקות.`})
-    response=await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(env.TWILIO_ACCOUNT_SID!)}/Messages.json`,
-      {method:'POST',headers:{authorization:`Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`,
-        'content-type':'application/x-www-form-urlencoded'},body:data})
-  }
-  if (!response.ok) throw new AuthError('שליחת הקוד נכשלה. נסו שוב מאוחר יותר',503)
+const googleKeys=createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'),
+  {[customFetch]:(...args)=>fetch(...args)})
+export async function googleIdentityStart(request:Request,db:Database,env:Env) {
+  if(!env.GOOGLE_CLIENT_ID)throw new AuthError('כניסה עם Google עדיין לא חוברה',503)
+  const linking=new URL(request.url).searchParams.get('link')==='1'
+  const account=linking?await getUser(request,db):null
+  if(linking&&!account)throw new AuthError('יש להתחבר כדי לחבר Google לחשבון',401)
+  const nonce=randomToken()
+  await db.prepare(`INSERT INTO oauth_states(state_hash,code_verifier,user_id,expires_at)
+    VALUES (?,'google-identity',?,datetime('now','+10 minutes'))`).bind(await sha256(nonce),account?.id||null).run()
+  return json({client_id:env.GOOGLE_CLIENT_ID,nonce},200,{'set-cookie':cookie(request,'madarom_google',nonce,600)})
+}
+export async function googleIdentityVerify(request:Request,db:Database,env:Env) {
+  const data=await body(request)
+  const nonce=/(?:^|;\s*)madarom_google=([0-9a-f]{64})(?:;|$)/.exec(request.headers.get('cookie')||'')?.[1]
+  const credential=safeText(data.credential,12000)
+  if(!env.GOOGLE_CLIENT_ID||!nonce||!credential)throw new AuthError('האימות עם Google נכשל',401)
+  let profile
+  try {
+    const result=await jwtVerify(credential,googleKeys,{issuer:['https://accounts.google.com','accounts.google.com'],
+      audience:env.GOOGLE_CLIENT_ID,algorithms:['RS256'],requiredClaims:['sub','exp','iat','nonce']})
+    profile=result.payload
+    if(profile.nonce!==nonce||typeof profile.iat!=='number'||profile.iat>Date.now()/1000+60)throw new Error('Invalid nonce or issued time')
+  } catch {throw new AuthError('האימות עם Google נכשל או פג תוקף',401)}
+  const stateHash=await sha256(nonce)
+  const state=await db.prepare(`SELECT user_id FROM oauth_states WHERE state_hash=? AND code_verifier='google-identity'
+    AND expires_at>datetime('now')`).bind(stateHash).first<{user_id:string|null}>()
+  if(!state)throw new AuthError('האימות עם Google פג תוקף',401)
+  const used=await db.prepare(`DELETE FROM oauth_states WHERE state_hash=? AND code_verifier='google-identity'
+    AND expires_at>datetime('now')`).bind(stateHash).run() as {meta?:{changes:number}}
+  if(!used.meta?.changes)throw new AuthError('האימות עם Google כבר נוצל',401)
+  const user=await googleAccount(request,db,profile,state.user_id)
+  const session=await issueSession(request,db,user)
+  const response=json({user,redirect:redirectFor(user.role)})
+  response.headers.append('set-cookie',session.sessionCookie)
+  response.headers.append('set-cookie',cookie(request,'madarom_google','',0))
+  return response
 }
 
 export async function requestCode(request:Request,db:Database,env:Env) {
@@ -78,7 +105,7 @@ export async function requestCode(request:Request,db:Database,env:Env) {
   await db.prepare(`INSERT INTO verification_challenges(id,channel,target,destination_hash,name,salt,code_hash,purpose,user_id,expires_at)
     VALUES (?,?,?,?,?,?,?,?,?,datetime('now','+10 minutes'))`).bind(id,channel,target,await sha256(target),name,salt,await sha256(`${salt}:${code}`),purpose,account?.id||null).run()
   try {await deliverCode(env,channel,target,code)}
-  catch (cause) {await db.prepare('DELETE FROM verification_challenges WHERE id=?').bind(id).run();throw cause}
+  catch {await db.prepare('DELETE FROM verification_challenges WHERE id=?').bind(id).run();throw new AuthError('שליחת הקוד נכשלה. נסו שוב מאוחר יותר',503)}
   return json({challenge_id:id,ok:true},201)
 }
 
@@ -195,13 +222,23 @@ export async function googleCallback(request:Request,db:Database,env:Env) {
     {headers:{authorization:`Bearer ${tokens.access_token}`}})
   if (!profileResponse.ok) throw new AuthError('לא התקבל פרופיל מאומת מ־Google',401)
   const profile=await profileResponse.json() as {sub?:string;email?:string;email_verified?:boolean;name?:string}
+  const user=await googleAccount(request,db,profile,row.user_id)
+  const session=await issueSession(request,db,user)
+  const headers=new Headers({location:new URL(redirectFor(user.role),request.url).href,'cache-control':'no-store'})
+  headers.append('set-cookie',session.sessionCookie)
+  headers.append('set-cookie',cookie(request,'madarom_oauth','',0))
+  return new Response(null,{status:302,headers})
+}
+
+type GoogleProfile={sub?:unknown;email?:unknown;email_verified?:unknown;name?:unknown;hd?:unknown}
+async function googleAccount(request:Request,db:Database,profile:GoogleProfile,linkUserId:string|null) {
   const email=safeText(profile.email,254).toLowerCase(),sub=safeText(profile.sub,255)
   if (!sub||!emailPattern.test(email)||profile.email_verified!==true) throw new AuthError('כתובת המייל ב־Google אינה מאומתת',401)
   let user=await db.prepare(`SELECT u.id,u.email,u.name,u.role,u.store_id FROM auth_identities a
     JOIN users u ON u.id=a.user_id WHERE a.provider='google' AND a.provider_subject=?`).bind(sub).first<User>()
-  if(row.user_id) {
+  if(linkUserId) {
     const current=await getUser(request,db)
-    if(!current||current.id!==row.user_id||current.email.toLowerCase()!==email)
+    if(!current||current.id!==linkUserId||current.email.toLowerCase()!==email)
       throw new AuthError('יש לחבר Google מתוך החשבון ועם אותה כתובת מייל',401)
     if(user&&user.id!==current.id)throw new AuthError('חשבון Google כבר משויך למשתמש אחר',409)
     user=current
@@ -214,9 +251,5 @@ export async function googleCallback(request:Request,db:Database,env:Env) {
     user=await verifiedEmailAccount(db,email,safeText(profile.name,120)||email.split('@')[0])
     await linkIdentity(db,user,'google',sub)
   }
-  const session=await issueSession(request,db,user)
-  const headers=new Headers({location:new URL(redirectFor(user.role),request.url).href,'cache-control':'no-store'})
-  headers.append('set-cookie',session.sessionCookie)
-  headers.append('set-cookie',cookie(request,'madarom_oauth','',0))
-  return new Response(null,{status:302,headers})
+  return user
 }

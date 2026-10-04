@@ -4,6 +4,10 @@ worker/
 .wrangler/
 .env
 .env.*
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+wrangler.*.local.jsonc
 !.env.example
 *.local
 *.db
