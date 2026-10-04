@@ -16,9 +16,6 @@ export interface MediaBucket {
 export interface Env {
   DB?: Database; MEDIA?: MediaBucket
   RESEND_API_KEY?:string; EMAIL_FROM?:string
-  SMTP_HOST?:string; SMTP_PORT?:string; SMTP_SECURE?:string
-  SMTP_USER?:string; SMTP_PASS?:string; SMTP_FROM?:string
-  SMS_WORKER_URL?:string; SMS_WORKER_SECRET?:string
   TWILIO_ACCOUNT_SID?:string; TWILIO_AUTH_TOKEN?:string; TWILIO_FROM?:string
   GOOGLE_CLIENT_ID?:string; GOOGLE_CLIENT_SECRET?:string
 }
