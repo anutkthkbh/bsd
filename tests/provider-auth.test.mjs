@@ -84,6 +84,30 @@ test('unconfigured providers fail honestly and failed delivery leaves no usable 
   assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM verification_challenges').get().n,0)
 })
 
+test('historical Resend MAIL_FROM supports real OTP flow and EMAIL_FROM takes precedence',async t=>{
+  const {sql,DB}=database(),messages=[]
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    assert.equal(String(url),'https://api.resend.com/emails')
+    const payload=JSON.parse(options.body);messages.push(payload)
+    assert.equal(options.headers.authorization,'Bearer test-only')
+    return new Response('{"id":"test-email"}',{status:200})
+  })
+  const legacy={RESEND_API_KEY:'test-only',MAIL_FROM:'  Madarom <legacy@example.com>  '}
+  assert.equal((await call(DB,'/auth/capabilities',{env:legacy})).data.email,true)
+  assert.equal((await call(DB,'/auth/capabilities',{env:{...legacy,MAIL_FROM:'  '}})).data.email,false)
+  const request=await call(DB,'/auth/request-code',{method:'POST',env:legacy,
+    body:{channel:'email',target:'legacy-buyer@example.com',name:'לקוח'}})
+  assert.equal(request.status,201);assert.equal(messages[0].from,'Madarom <legacy@example.com>')
+  const verified=await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:request.data.challenge_id,
+    code:messages[0].text.match(/\b\d{6}\b/)[0]}})
+  assert.equal(verified.status,200);assert.equal(verified.data.redirect,'/account')
+  const preferred={...legacy,EMAIL_FROM:'Madarom <current@example.com>'}
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:preferred,
+    body:{channel:'email',target:'current-buyer@example.com',name:'לקוח'}})).status,201)
+  assert.equal(messages.at(-1).from,'Madarom <current@example.com>')
+  sql.close()
+})
+
 test('email OTP registers verified customers, prevents role escalation/replay and logs out',async t=>{
   const {sql,DB}=database(),messages=delivery(t)
   const account=await emailAccount(DB,messages)

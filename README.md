@@ -1,5 +1,7 @@
 # מדרום
 
+> ענף זה הוא גרסת ייחוס לא פעילה מתוך הארכיון שהועלה ב־5 באוקטובר 2026. הפריסה חסומה; האתר החי ו־`main` נשמרו. פרטים וממצאי האימות: [REFERENCE_VERSION.md](REFERENCE_VERSION.md). ההוראות בהמשך מתארות את בסיס Cloudflare לפני יצירת עותק הייחוס.
+
 מערכת קניון דיגיטלי מבוססת React, TypeScript, Cloudflare Workers ו־D1, עם API שנבנה מ־Pages Functions.
 
 ## מצב נוכחי

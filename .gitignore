@@ -15,3 +15,8 @@ wrangler.*.local.jsonc
 *.zip
 admin-seed.sql
 *.log
+reference/legacy-system/server/data/
+reference/legacy-system/*orders*.txt
+*.env
+*.env.*
+!.env.example

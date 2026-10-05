@@ -1,0 +1,16 @@
+{
+  "status": "inactive-reference",
+  "production_deployment": false,
+  "source_archive": "next (3).zip",
+  "archive_sha256": "e00e1c4d93de25f1a4e22da9b22870dff31dcd9ee7b4f5e15b5165189bfc67ce",
+  "baseline_commit": "b51e8c8ad32d2f7f771a98f2e4489d43f9f7f416",
+  "excluded": [
+    "credentials and environment backups",
+    "customer/store/order databases",
+    "generated builds",
+    "dependencies",
+    "development accounts and SMS sender scripts",
+    "historical checkout export"
+  ],
+  "imported_source_files": 53
+}

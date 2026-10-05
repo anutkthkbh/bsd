@@ -1,0 +1,40 @@
+{
+  "name": "madarom",
+  "version": "1.0.0",
+  "description": "מדרום — הקניון הדיגיטלי של העסקים המקומיים",
+  "main": "index.js",
+  "scripts": {
+    "server": "node server/index.js",
+    "server:dev": "nodemon server/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "concurrently -n SERVER,CLIENT -c green,blue \"npm run server:dev\" \"npm run client\"",
+    "client": "npm --prefix my-app run dev"
+  },
+  "keywords": [
+    "marketplace",
+    "ecommerce",
+    "israel"
+  ],
+  "author": "מדרום",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "engines": {
+    "node": ">18.0.0"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "google-auth-library": "11.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "nodemailer": "9.0.6",
+    "resend": "6.26.0",
+    "uuid": "^14.0.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0",
+    "nodemon": "^3.1.14"
+  }
+}
