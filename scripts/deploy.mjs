@@ -30,6 +30,16 @@ export function validateDatabaseOwnership(databaseName,rows,databaseId='') {
   }
 }
 
+export function validateOwnerMigration(rows) {
+  if(rows.length)throw new Error('Owner promotion would leave an existing store without a merchant. Assign another merchant before migration 0009; no migrations were applied.')
+}
+export function ownerMigrationInspection(hasHistory) {
+  const history=hasHistory?"AND NOT EXISTS(SELECT 1 FROM d1_migrations WHERE name='0009_owner_admin.sql')":''
+  return `SELECT id FROM users owner WHERE owner.email='shmuelilani14789@gmail.com'
+    AND owner.role='merchant' AND owner.store_id IS NOT NULL
+    AND NOT EXISTS(SELECT 1 FROM users other WHERE other.role='merchant' AND other.store_id=owner.store_id AND other.id<>owner.id) ${history}`
+}
+
 const inspection=`SELECT 'table' kind,name table_name,'' column_name FROM sqlite_master WHERE type='table'
   UNION ALL SELECT 'column',m.name,p.name FROM sqlite_master m,pragma_table_info(m.name) p
   WHERE m.type='table' AND m.name IN ('stores','products','users','sessions')`
@@ -67,7 +77,14 @@ export function deploy(args=process.argv.slice(2)) {
   catch{throw new Error('Cannot inspect the configured D1. Check Cloudflare sign-in and D1 permissions. No migrations were applied.')}
   const response=JSON.parse(output)
   if(!Array.isArray(response)||response.some(item=>item.success===false))throw new Error('Database inspection failed; no migrations were applied')
-  validateDatabaseOwnership(db.database_name,response.flatMap(item=>item.results||[]),db.database_id)
+  const rows=response.flatMap(item=>item.results||[])
+  validateDatabaseOwnership(db.database_name,rows,db.database_id)
+  if(rows.some(row=>row.kind==='table'&&row.table_name==='users')) {
+    const ownerCheck=ownerMigrationInspection(rows.some(row=>row.kind==='table'&&row.table_name==='d1_migrations'))
+    const inspected=JSON.parse(run(['d1','execute','DB','--remote','--config',configPath,'--command',ownerCheck,'--json'],['ignore','pipe','inherit']))
+    if(!Array.isArray(inspected)||inspected.some(item=>item.success===false))throw new Error('Owner migration inspection failed; no migrations were applied')
+    validateOwnerMigration(inspected.flatMap(item=>item.results||[]))
+  }
   // Wrangler applies each migration once, using its migration history.
   run(['d1','migrations','apply','DB','--remote','--config',configPath])
   run(['deploy',...args])

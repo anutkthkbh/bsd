@@ -4,7 +4,7 @@ export function providerConfiguration(env:Env) {
   const smtpPort=Number(env.SMTP_PORT||465)
   return {
     email:env.SMTP_HOST&&env.SMTP_USER&&env.SMTP_PASS&&env.SMTP_FROM&&[465,587].includes(smtpPort)?'smtp':
-      env.RESEND_API_KEY&&env.EMAIL_FROM?'resend':null,
+      env.RESEND_API_KEY&&(env.EMAIL_FROM?.trim()||env.MAIL_FROM?.trim())?'resend':null,
     sms:env.SMS_WORKER_URL&&env.SMS_WORKER_SECRET?'worker':
       env.TWILIO_ACCOUNT_SID&&env.TWILIO_AUTH_TOKEN&&env.TWILIO_FROM?'twilio':null,
   } as const
@@ -29,7 +29,11 @@ export async function deliverCode(env:Env,channel:'email'|'sms',target:string,co
   let response:Response
   if(channel==='email'&&configured.email==='resend') {
     response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{authorization:`Bearer ${env.RESEND_API_KEY}`,'content-type':'application/json'},
-      body:JSON.stringify({from:env.EMAIL_FROM,to:[target],subject:'קוד הכניסה למדרום',text}),signal:AbortSignal.timeout(15000)})
+      body:JSON.stringify({from:env.EMAIL_FROM?.trim()||env.MAIL_FROM?.trim(),to:[target],subject:'קוד הכניסה למדרום',text}),signal:AbortSignal.timeout(15000)})
+    if(response.ok) {
+      const result=await response.json().catch(()=>null) as {id?:unknown;error?:unknown}|null
+      if(typeof result?.id!=='string'||!result.id||result.error)throw new Error('Email delivery rejected')
+    }
   } else if(channel==='sms'&&configured.sms==='worker') {
     const url=new URL(env.SMS_WORKER_URL!)
     if(url.protocol!=='https:'||url.username||url.password)throw new Error('Invalid SMS Worker URL')

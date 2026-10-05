@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ils, send, type Account, type CustomerAccountData, type Notification, type NotificationsData } from './api'
-import PhoneVerification from './PhoneVerification'
+import AccountVerification from './AccountVerification'
 
 const Arrow = () => <span aria-hidden="true">←</span>
 const storeStatus:Record<string,string>={new:'חדשה',contacted:'נוצר קשר',closed:'נסגרה'}
@@ -29,6 +29,7 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
   const [data,setData]=useState<CustomerAccountData|null>(null)
   const [notifications,setNotifications]=useState<NotificationsData>({notifications:[],unread:0})
   const [form,setForm]=useState({name:user?.name||'',phone:''})
+  const [verificationRevision,setVerificationRevision]=useState(0)
   const [errorText,setError]=useState('')
   const [notice,setNotice]=useState('')
   const [busy,setBusy]=useState(false)
@@ -61,6 +62,7 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
       setData(next)
       setForm({name:next.user.name,phone:next.profile?.phone||''})
       onUserChange(next.user)
+      setVerificationRevision(value=>value+1)
       setNotice('פרטי החשבון נשמרו')
     } catch(error) {
       setError((error as Error).message)
@@ -117,7 +119,7 @@ export default function CustomerAccountPage({user,onLogout,onUserChange}:{
         </form>
       </Panel>
       <Panel title="אימות החשבון">
-        <PhoneVerification emailVerified={!!data?.profile?.email_verified} phoneVerified={!!data?.profile?.phone_verified} googleLinked={data?.google_linked} defaultPhone={data?.profile?.phone||''} onVerified={()=>api<CustomerAccountData>('/account').then(next=>{setData(next);setForm({name:next.user.name,phone:next.profile?.phone||''})}).catch(error=>setError(error.message))}/>
+        <AccountVerification revision={verificationRevision} onVerified={()=>api<CustomerAccountData>('/account').then(next=>{setData(next);setForm({name:next.user.name,phone:next.profile?.phone||''})}).catch(error=>setError(error.message))}/>
       </Panel>
     </div>
 

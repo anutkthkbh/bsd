@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { deploymentConfig, validateDatabaseOwnership } from '../scripts/deploy.mjs'
+import { deploymentConfig, validateDatabaseOwnership, validateOwnerMigration, ownerMigrationInspection } from '../scripts/deploy.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { readFileSync, readdirSync } from 'node:fs'
 
@@ -31,4 +31,17 @@ test('deployment checks the same config for all CLI forms and refuses environmen
   assert.equal(deploymentConfig(['--dry-run']),'wrangler.jsonc')
   for(const args of [['--env','prod'],['--env=prod'],['-eprod'],['--cwd','other'],['--config'],['--config='],['--config','a','--config=b']])
     assert.throws(()=>deploymentConfig(args))
+})
+
+test('owner promotion stops before an existing store loses its only merchant',()=>{
+  const db=new DatabaseSync(':memory:')
+  for(const file of readdirSync('migrations').sort().filter(f=>f!=='0009_owner_admin.sql'))db.exec(readFileSync('migrations/'+file,'utf8'))
+  db.exec(`INSERT INTO stores(id,slug,name,category) VALUES ('existing-store','existing-store','Existing store','Home');
+    INSERT INTO users(id,email,name,role,store_id) VALUES ('owner','shmuelilani14789@gmail.com','Owner','merchant','existing-store');`)
+  assert.throws(()=>validateOwnerMigration(db.prepare(ownerMigrationInspection(false)).all()),/without a merchant/)
+  db.exec("INSERT INTO users(id,email,name,role,store_id) VALUES ('replacement','merchant@example.com','Merchant','merchant','existing-store')")
+  assert.doesNotThrow(()=>validateOwnerMigration(db.prepare(ownerMigrationInspection(false)).all()))
+  db.exec("DELETE FROM users WHERE id='replacement'; CREATE TABLE d1_migrations(name TEXT); INSERT INTO d1_migrations VALUES ('0009_owner_admin.sql')")
+  assert.doesNotThrow(()=>validateOwnerMigration(db.prepare(ownerMigrationInspection(true)).all()))
+  db.close()
 })

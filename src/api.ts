@@ -20,6 +20,7 @@ export interface CustomerPurchaseRequest {
   id:string; status:'open'|'closed'; total_agorot:number; created_at:string; stores:CustomerStoreRequest[]
 }
 export interface CustomerAccountData { user:Account; profile:CustomerProfile|null; requests:CustomerPurchaseRequest[]; google_linked:boolean }
+export interface VerificationStatus { email:string; email_verified:boolean; phone:string; phone_verified:boolean; google_linked:boolean }
 export interface Notification {
   id:string; type:string; title:string; message:string; target_url:string; read_at:string|null; created_at:string
 }

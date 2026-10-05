@@ -16,10 +16,10 @@ const compiled = await build({entryPoints:['functions/api/[[path]].ts'],bundle:t
 const {onRequest} = await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'))
 const signing=await generateKeyPair('RS256'),publicJwk={...await exportJWK(signing.publicKey),kid:'test-rsa',alg:'RS256',use:'sig'}
 
-function database() {
+function database(skipMigration) {
   const sql = new DatabaseSync(':memory:')
   sql.exec('PRAGMA foreign_keys=ON')
-  for (const file of readdirSync('migrations').sort()) sql.exec(readFileSync('migrations/'+file,'utf8'))
+  for (const file of readdirSync('migrations').sort()) if (file!==skipMigration) sql.exec(readFileSync('migrations/'+file,'utf8'))
   const DB={
     prepare(query) {
       const params=[]
@@ -61,7 +61,7 @@ function delivery(t,{fail=false}={}) {
     } else if(String(url).startsWith('https://api.twilio.com/')) {
       const data=new URLSearchParams(options.body);messages.push({to:data.get('To'),code:data.get('Body').match(/\b\d{6}\b/)[0]})
     } else throw new Error('unexpected external request')
-    return new Response('{}',{status:fail?503:200})
+    return new Response('{"id":"test-delivery"}',{status:fail?503:200})
   })
   return messages
 }
@@ -142,6 +142,13 @@ test('SMS proof binds to the current account, cannot trust an entered phone, and
   await call(DB,'/account',{method:'PATCH',cookie:account.cookie,body:{name:'לקוח בדיקה',phone:'050-1234567'}})
   assert.equal((await call(DB,'/account',{cookie:account.cookie})).data.profile.phone_verified,1)
   assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM auth_identities WHERE provider='sms_code'").get().n,1)
+  const identity=sql.prepare("SELECT * FROM auth_identities WHERE provider='sms_code'").get()
+  sql.prepare('DELETE FROM auth_identities WHERE id=?').run(identity.id)
+  assert.equal(sql.prepare('SELECT phone_verified FROM customer_profiles WHERE user_id=?').get(account.data.user.id).phone_verified,1)
+  assert.equal((await call(DB,'/auth/status',{cookie:account.cookie})).data.phone_verified,false)
+  assert.equal((await call(DB,'/account',{cookie:account.cookie})).data.profile.phone_verified,0)
+  sql.prepare('INSERT INTO auth_identities(id,user_id,provider,provider_subject) VALUES (?,?,?,?)')
+    .run(identity.id,identity.user_id,identity.provider,identity.provider_subject)
   sql.prepare("UPDATE verification_challenges SET created_at=datetime('now','-2 minutes')").run()
   const login=await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'sms',target:'0501234567'}})
   const session=await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:login.data.challenge_id,code:messages.at(-1).code}})
@@ -223,6 +230,7 @@ test('external Google email requires authenticated linking before access to staf
   const done=await call(DB,`/auth/google/callback?state=${linked.state}&code=test`,{env:providers,cookie:linked.response.cookie+'; '+account.cookie})
   assert.equal(done.headers.get('location'),'https://madarom.example/admin')
   assert.equal(sql.prepare("SELECT user_id FROM auth_identities WHERE provider='google'").get().user_id,id)
+  assert.equal((await call(DB,'/auth/status',{cookie:account.cookie})).data.google_linked,true)
   const returning=await start()
   assert.equal((await call(DB,`/auth/google/callback?state=${returning.state}&code=test`,{env:providers,cookie:returning.response.cookie})).headers.get('location'),'https://madarom.example/admin')
 })
@@ -288,6 +296,56 @@ test('Google Identity restores Client ID sign-in with JWT signature, audience, n
   assert.equal(sql.prepare("SELECT COUNT(*) n FROM users WHERE email='identity@gmail.com'").get().n,1)
 })
 
+test('Gmail linking verifies the email of existing staff without changing their role or credentials',async t=>{
+  const {sql,DB}=database(),env={GOOGLE_CLIENT_ID:'test-gis-client'},salt='test-staff-salt',password='staff-password-for-test'
+  const store=randomUUID()
+  sql.prepare('INSERT INTO stores(id,slug,name,category) VALUES (?,?,?,?)').run(store,'staff-google','חנות בדיקה','בית')
+  t.mock.method(globalThis,'fetch',async url=>{
+    assert.equal(String(url),'https://www.googleapis.com/oauth2/v3/certs')
+    return Response.json({keys:[publicJwk]},{headers:{'cache-control':'public,max-age=3600'}})
+  })
+  for(const role of ['merchant','admin']) {
+    const id=randomUUID(),email=`${role}-link@gmail.com`,hash=pbkdf2Sync(password,salt,210000,32,'sha256').toString('hex')
+    sql.prepare('INSERT INTO users(id,email,name,role,store_id,password_salt,password_hash) VALUES (?,?,?,?,?,?,?)')
+      .run(id,email,'משתמש בדיקה',role,role==='merchant'?store:null,salt,hash)
+    const login=await call(DB,'/login',{method:'POST',body:{email,password}})
+    assert.equal(login.status,200)
+    assert.equal((await call(DB,'/auth/status',{cookie:login.cookie})).data.email_verified,false)
+    const start=await call(DB,'/auth/google/identity/start?link=1',{env,cookie:login.cookie})
+    const credential=await new SignJWT({email,email_verified:true,name:'משתמש בדיקה',nonce:start.data.nonce})
+      .setProtectedHeader({alg:'RS256',kid:'test-rsa'}).setIssuer('https://accounts.google.com').setAudience(env.GOOGLE_CLIENT_ID)
+      .setSubject(`${role}-link-subject`).setIssuedAt().setExpirationTime('5m').sign(signing.privateKey)
+    const linked=await call(DB,'/auth/google/identity/verify',{method:'POST',env,cookie:start.cookie+'; '+login.cookie,body:{credential}})
+    assert.equal(linked.status,200);assert.equal(linked.data.user.id,id);assert.equal(linked.data.redirect,`/${role}`)
+    const status=(await call(DB,'/auth/status',{cookie:login.cookie})).data
+    assert.equal(status.google_linked,true);assert.equal(status.email_verified,true)
+    assert.equal(sql.prepare('SELECT password_hash FROM users WHERE id=?').get(id).password_hash,hash)
+  }
+})
+
+test('historical MAIL_FROM is accepted, EMAIL_FROM takes precedence, and malformed Resend success is rejected',async t=>{
+  const {sql,DB}=database(),env={RESEND_API_KEY:'test-only',MAIL_FROM:'Madarom <auth@example.com>'}
+  let result={id:'test-message'},captured
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    assert.equal(String(url),'https://api.resend.com/emails')
+    captured=JSON.parse(options.body)
+    return Response.json(result)
+  })
+  assert.equal((await call(DB,'/auth/capabilities',{env})).data.email,true)
+  const sent=await call(DB,'/auth/request-code',{method:'POST',env,body:{channel:'email',target:'alias-buyer@example.com',name:'לקוח'}})
+  assert.equal(sent.status,201);assert.equal(captured.from,env.MAIL_FROM)
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:sent.data.challenge_id,code:captured.text.match(/\b\d{6}\b/)[0]}})).status,200)
+  const override={...env,EMAIL_FROM:'Madarom <current@example.com>'}
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:override,body:{channel:'email',target:'current-buyer@example.com',name:'לקוח'}})).status,201)
+  assert.equal(captured.from,override.EMAIL_FROM)
+  for(const [index,bad] of [{},{id:''},{id:123},{id:'message',error:'rejected'}].entries()) {
+    result=bad
+    const target=`rejected-${index}@example.com`
+    assert.equal((await call(DB,'/auth/request-code',{method:'POST',env,body:{channel:'email',target,name:'לקוח'}})).status,503)
+    assert.equal(sql.prepare('SELECT COUNT(*) n FROM verification_challenges WHERE target=?').get(target).n,0)
+  }
+})
+
 test('database readiness detects missing migration tables and catalog returns an actionable 503',async()=>{
   const {sql,DB}=database()
   assert.equal((await call(DB,'/health')).data.ok,true)
@@ -316,4 +374,103 @@ test('SMTP uses the historical settings, requires TLS and never succeeds on reje
   reject=true
   assert.equal((await call(DB,'/auth/request-code',{method:'POST',env,body:{channel:'email',target:'rejected@example.com',name:'לקוח'}})).status,503)
   assert.equal(sql.prepare("SELECT COUNT(*) n FROM verification_challenges WHERE target='rejected@example.com'").get().n,0)
+})
+
+const owner='shmuelilani14789@gmail.com'
+test('platform owner is an admin without a password and signs in only through verified channels',async t=>{
+  const {sql,DB}=database(),messages=delivery(t)
+  const row=sql.prepare('SELECT id,role,store_id,password_salt,password_hash FROM users WHERE email=?').get(owner)
+  assert.equal(row.role,'admin');assert.equal(row.store_id,null);assert.equal(row.password_salt+row.password_hash,'')
+  assert.equal((await call(DB,'/login',{method:'POST',body:{email:owner,password:'any-long-password-guess'}})).status,401)
+  const login=await emailAccount(DB,messages,owner)
+  assert.equal(login.data.user.id,row.id);assert.equal(login.data.user.role,'admin');assert.equal(login.data.redirect,'/admin')
+  assert.equal((await call(DB,'/admin/overview',{cookie:login.cookie})).status,200)
+  assert.equal(sql.prepare('SELECT COUNT(*) n FROM users WHERE email=?').get(owner).n,1)
+})
+
+test('platform owner signs in to the admin area with Google Identity',async t=>{
+  const {sql,DB}=database(),env={GOOGLE_CLIENT_ID:'test-gis-client'}
+  t.mock.method(globalThis,'fetch',async url=>{
+    assert.equal(String(url),'https://www.googleapis.com/oauth2/v3/certs')
+    return Response.json({keys:[publicJwk]},{headers:{'cache-control':'public,max-age=3600'}})
+  })
+  const start=await call(DB,'/auth/google/identity/start',{env})
+  const credential=await new SignJWT({email:owner,email_verified:true,name:'שמואל',nonce:start.data.nonce})
+    .setProtectedHeader({alg:'RS256',kid:'test-rsa'}).setIssuer('https://accounts.google.com').setAudience(env.GOOGLE_CLIENT_ID)
+    .setSubject('owner-google-subject').setIssuedAt().setExpirationTime('5m').sign(signing.privateKey)
+  const done=await call(DB,'/auth/google/identity/verify',{method:'POST',cookie:start.cookie,env,body:{credential}})
+  assert.equal(done.status,200);assert.equal(done.data.user.role,'admin');assert.equal(done.data.redirect,'/admin')
+  assert.equal(sql.prepare('SELECT COUNT(*) n FROM users WHERE email=?').get(owner).n,1)
+  assert.deepEqual((await call(DB,'/auth/status',{cookie:done.cookie})).data,
+    {email:owner,email_verified:true,phone:'',phone_verified:false,google_linked:true})
+})
+
+test('platform owner verifies a phone from the admin session and then signs in with SMS',async t=>{
+  const {sql,DB}=database(),messages=delivery(t),admin=await emailAccount(DB,messages,owner)
+  const request=await call(DB,'/auth/request-code',{method:'POST',env:providers,cookie:admin.cookie,body:{channel:'sms',target:'050-1234567',purpose:'verify'}})
+  assert.equal(request.status,201);assert.equal(messages.at(-1).to,'+972501234567')
+  const verified=await call(DB,'/auth/verify-code',{method:'POST',cookie:admin.cookie,body:{challenge_id:request.data.challenge_id,code:messages.at(-1).code}})
+  assert.equal(verified.status,200)
+  assert.deepEqual((await call(DB,'/auth/status',{cookie:admin.cookie})).data,
+    {email:owner,email_verified:true,phone:'+972501234567',phone_verified:true,google_linked:false})
+  sql.prepare("UPDATE verification_challenges SET created_at=datetime('now','-2 minutes')").run()
+  const login=await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'sms',target:'0501234567'}})
+  const session=await call(DB,'/auth/verify-code',{method:'POST',body:{challenge_id:login.data.challenge_id,code:messages.at(-1).code}})
+  assert.equal(session.data.user.id,admin.data.user.id);assert.equal(session.data.redirect,'/admin')
+})
+
+test('signed-in staff verify their own email by code and cannot redirect the code elsewhere',async t=>{
+  const {sql,DB}=database(),messages=delivery(t),store=randomUUID(),salt='local-test-salt'
+  sql.prepare('INSERT INTO stores(id,slug,name,category) VALUES (?,?,?,?)').run(store,'verify-store','חנות בדיקה','בית')
+  sql.prepare("INSERT INTO users(id,email,name,role,store_id,password_salt,password_hash) VALUES (?,?,?,'merchant',?,?,?)")
+    .run(randomUUID(),'merchant@example.com','סוחר בדיקה',store,salt,pbkdf2Sync('very-secure-merchant-password',salt,210000,32,'sha256').toString('hex'))
+  const login=await call(DB,'/login',{method:'POST',body:{email:'merchant@example.com',password:'very-secure-merchant-password'}})
+  assert.equal(login.status,200)
+  assert.deepEqual((await call(DB,'/auth/status',{cookie:login.cookie})).data,
+    {email:'merchant@example.com',email_verified:false,phone:'',phone_verified:false,google_linked:false})
+  assert.equal((await call(DB,'/auth/status')).status,401)
+  assert.equal((await call(DB,'/auth/request-code',{method:'POST',env:providers,body:{channel:'email',purpose:'verify'}})).status,401)
+  const request=await call(DB,'/auth/request-code',{method:'POST',env:providers,cookie:login.cookie,
+    body:{channel:'email',purpose:'verify',target:'someone-else@example.com'}})
+  assert.equal(request.status,201);assert.equal(messages.at(-1).to,'merchant@example.com')
+  assert.equal(sql.prepare('SELECT target FROM verification_challenges WHERE id=?').get(request.data.challenge_id).target,'merchant@example.com')
+  const payload={challenge_id:request.data.challenge_id,code:messages.at(-1).code}
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',body:payload})).status,401)
+  const verified=await call(DB,'/auth/verify-code',{method:'POST',cookie:login.cookie,body:payload})
+  assert.equal(verified.status,200);assert.equal(verified.data.verified,true)
+  assert.equal((await call(DB,'/auth/status',{cookie:login.cookie})).data.email_verified,true)
+  assert.equal((await call(DB,'/auth/verify-code',{method:'POST',cookie:login.cookie,body:payload})).status,401)
+  assert.equal((await call(DB,'/merchant/overview',{cookie:login.cookie})).status,200)
+  assert.equal(sql.prepare("SELECT role FROM users WHERE email='merchant@example.com'").get().role,'merchant')
+})
+
+test('owner migration promotes an existing account, revokes its old credentials and leaves an existing admin alone',()=>{
+  const migration=readFileSync('migrations/0009_owner_admin.sql','utf8')
+  const customer=database('0009_owner_admin.sql'),customerId=randomUUID()
+  customer.sql.prepare("INSERT INTO users(id,email,name,role,password_salt,password_hash) VALUES (?,?,?,'customer','salt','hash')").run(customerId,owner.toUpperCase(),'לקוח ישן')
+  customer.sql.prepare('INSERT INTO customer_profiles(user_id,phone,email_verified,phone_verified) VALUES (?,?,1,1)').run(customerId,'+972501234567')
+  customer.sql.prepare("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES (?,?,?,datetime('now','+1 day'))").run(randomUUID(),customerId,'a'.repeat(64))
+  customer.sql.prepare("INSERT INTO auth_identities(id,user_id,provider,provider_subject) VALUES (?,?,'password',?)").run(randomUUID(),customerId,owner)
+  customer.sql.exec(migration)
+  const promoted=customer.sql.prepare('SELECT id,role,store_id,password_salt,password_hash FROM users WHERE email=?').all(owner)
+  assert.equal(promoted.length,1);assert.equal(promoted[0].id,customerId);assert.equal(promoted[0].role,'admin')
+  assert.equal(promoted[0].password_salt+promoted[0].password_hash,'')
+  assert.equal(customer.sql.prepare('SELECT COUNT(*) n FROM sessions WHERE user_id=?').get(customerId).n,0)
+  assert.equal(customer.sql.prepare('SELECT COUNT(*) n FROM auth_identities WHERE user_id=?').get(customerId).n,0)
+  assert.deepEqual({...customer.sql.prepare('SELECT phone,email_verified,phone_verified FROM customer_profiles WHERE user_id=?').get(customerId)},
+    {phone:'',email_verified:0,phone_verified:0})
+
+  const merchant=database('0009_owner_admin.sql'),store=randomUUID(),merchantId=randomUUID()
+  merchant.sql.prepare('INSERT INTO stores(id,slug,name,category) VALUES (?,?,?,?)').run(store,'owner-store','חנות','בית')
+  merchant.sql.prepare("INSERT INTO users(id,email,name,role,store_id) VALUES (?,?,?,'merchant',?)").run(merchantId,owner,'סוחר',store)
+  merchant.sql.exec(migration)
+  assert.deepEqual({...merchant.sql.prepare('SELECT role,store_id FROM users WHERE id=?').get(merchantId)},{role:'admin',store_id:null})
+  assert.equal(merchant.sql.prepare('SELECT COUNT(*) n FROM stores WHERE id=?').get(store).n,1)
+
+  const admin=database('0009_owner_admin.sql'),adminId=randomUUID()
+  admin.sql.prepare("INSERT INTO users(id,email,name,role,password_salt,password_hash) VALUES (?,?,?,'admin','salt','hash')").run(adminId,owner,'מנהל קיים')
+  admin.sql.prepare("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES (?,?,?,datetime('now','+1 day'))").run(randomUUID(),adminId,'b'.repeat(64))
+  admin.sql.exec(migration)
+  assert.deepEqual({...admin.sql.prepare('SELECT id,name,role,password_hash FROM users WHERE email=?').get(owner)},{id:adminId,name:'מנהל קיים',role:'admin',password_hash:'hash'})
+  assert.equal(admin.sql.prepare('SELECT COUNT(*) n FROM sessions WHERE user_id=?').get(adminId).n,1)
 })

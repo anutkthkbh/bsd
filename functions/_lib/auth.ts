@@ -28,6 +28,18 @@ export async function authCapabilities(env:Env) {
   return {email:!!configured.email,sms:!!configured.sms,google:!!env.GOOGLE_CLIENT_ID,
     ...(env.GOOGLE_CLIENT_ID?{google_mode:'identity' as const}:{})}
 }
+export async function verificationStatus(db:Database,user:User) {
+  const [profile,google]=await Promise.all([
+    db.prepare(`SELECT p.phone,p.email_verified,
+      (p.phone_verified=1 AND EXISTS(SELECT 1 FROM auth_identities a WHERE a.user_id=p.user_id
+        AND a.provider='sms_code' AND a.provider_subject=p.phone)) AS phone_verified
+      FROM customer_profiles p WHERE p.user_id=?`).bind(user.id)
+      .first<{phone:string;email_verified:number;phone_verified:number}>(),
+    db.prepare("SELECT id FROM auth_identities WHERE user_id=? AND provider='google' LIMIT 1").bind(user.id).first(),
+  ])
+  return {email:user.email,email_verified:!!profile?.email_verified,phone:profile?.phone||'',
+    phone_verified:!!profile?.phone_verified,google_linked:!!google}
+}
 
 const googleKeys=createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'),
   {[customFetch]:(...args)=>fetch(...args)})
@@ -73,13 +85,14 @@ export async function requestCode(request:Request,db:Database,env:Env) {
   if (channel!=='email'&&channel!=='sms') throw new AuthError('בחרו דרך כניסה')
   const capabilities=await authCapabilities(env)
   if (!capabilities[channel]) throw new AuthError('דרך הכניסה הזו עדיין לא חוברה',503)
-  const target=channel==='email'?safeText(data.target,254).toLowerCase():phoneNumber(data.target)
-  if (!target || (channel==='email'&&!emailPattern.test(target))) throw new AuthError('הזינו כתובת מייל או מספר טלפון תקינים')
-  const name=safeText(data.name,120)
   const purpose=data.purpose==='verify'?'verify':'login'
   const account=purpose==='verify'?await getUser(request,db):null
-  if (purpose==='verify'&&(!account||channel!=='sms')) throw new AuthError('יש להתחבר כדי לאמת מספר טלפון',401)
-  if (channel==='email'&&name.length<2) {
+  if (purpose==='verify'&&!account) throw new AuthError('יש להתחבר כדי לאמת את החשבון',401)
+  // Email verification always targets the signed-in account's own address, never a client-supplied one.
+  const target=channel==='email'?safeText(account?.email??data.target,254).toLowerCase():phoneNumber(data.target)
+  if (!target || (channel==='email'&&!emailPattern.test(target))) throw new AuthError('הזינו כתובת מייל או מספר טלפון תקינים')
+  const name=safeText(data.name,120)
+  if (channel==='email'&&purpose==='login'&&name.length<2) {
     const existing=await db.prepare('SELECT id FROM users WHERE email=?').bind(target).first()
     if (!existing) throw new AuthError('להרשמה יש למלא שם מלא')
   }
@@ -161,11 +174,18 @@ export async function verifyCode(request:Request,db:Database) {
   }
   const current=challenge.purpose==='verify'?await getUser(request,db):null
   if(challenge.purpose==='verify'&&(!current||current.id!==challenge.user_id))throw new AuthError('יש להתחבר לחשבון שביקש את האימות',401)
+  if(challenge.purpose==='verify'&&challenge.channel==='email'&&challenge.target!==current?.email.toLowerCase())
+    throw new AuthError('הקוד אינו מתאים לחשבון',401)
   const used=await db.prepare(`UPDATE verification_challenges SET consumed_at=CURRENT_TIMESTAMP WHERE id=? AND consumed_at IS NULL
     AND expires_at>datetime('now') AND attempts<5`).bind(id).run() as {meta?:{changes:number}}
   if (!used.meta?.changes) throw new AuthError('הקוד כבר נוצל',401)
   let user:User
-  if(challenge.purpose==='verify'&&current) {
+  if(challenge.purpose==='verify'&&current&&challenge.channel==='email') {
+    await linkIdentity(db,current,'email_code',challenge.target)
+    await db.prepare(`INSERT INTO customer_profiles(user_id,email_verified) VALUES (?,1)
+      ON CONFLICT(user_id) DO UPDATE SET email_verified=1,updated_at=CURRENT_TIMESTAMP`).bind(current.id).run()
+    return json({ok:true,verified:true})
+  } else if(challenge.purpose==='verify'&&current) {
     await linkIdentity(db,current,'sms_code',challenge.target)
     await db.batch([
       db.prepare("DELETE FROM auth_identities WHERE user_id=? AND provider='sms_code' AND provider_subject<>?").bind(current.id,challenge.target),
@@ -251,5 +271,7 @@ async function googleAccount(request:Request,db:Database,profile:GoogleProfile,l
     user=await verifiedEmailAccount(db,email,safeText(profile.name,120)||email.split('@')[0])
     await linkIdentity(db,user,'google',sub)
   }
+  if(email.endsWith('@gmail.com'))await db.prepare(`INSERT INTO customer_profiles(user_id,email_verified) VALUES (?,1)
+    ON CONFLICT(user_id) DO UPDATE SET email_verified=1,updated_at=CURRENT_TIMESTAMP`).bind(user.id).run()
   return user
 }

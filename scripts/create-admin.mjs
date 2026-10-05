@@ -34,6 +34,8 @@ const quote = value => String(value).replaceAll("'", "''")
 const salt = randomBytes(32).toString('hex')
 const hash = pbkdf2Sync(password, salt, 210000, 32, 'sha256').toString('hex')
 const sql = `INSERT INTO users(id,email,name,role,store_id,password_salt,password_hash)
-VALUES ('${randomUUID()}','${quote(email)}','${quote(name)}','admin',NULL,'${salt}','${hash}');\n`
+VALUES ('${randomUUID()}','${quote(email)}','${quote(name)}','admin',NULL,'${salt}','${hash}')
+ON CONFLICT(email) DO UPDATE SET password_salt=excluded.password_salt,password_hash=excluded.password_hash
+WHERE users.role='admin';\n`
 writeFileSync('admin-seed.sql', sql, {mode:0o600,flag:'wx'})
-console.log('נוצר admin-seed.sql. הפעילו אותו מול D1 ומחקו את הקובץ לאחר מכן.')
+console.log('נוצר admin-seed.sql: מנהל חדש, או החלפת סיסמה למנהל קיים באותו מייל. הפעילו אותו מול D1 ומחקו את הקובץ לאחר מכן.')

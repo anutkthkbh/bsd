@@ -3,7 +3,7 @@ import { body, error, getUser, json, money, passwordHash, randomId, randomToken,
 import { customerRequests, merchantRequests, quoteRequest, RequestError, requestsReady, submitRequest, updateMerchantRequest } from '../_lib/requests'
 import { getMedia, uploadMedia } from '../_lib/media'
 import { markAllNotificationsRead, markNotificationRead, notificationResponse } from '../_lib/notifications'
-import { AuthError, authCapabilities, googleCallback, googleStart, googleIdentityStart, googleIdentityVerify, phoneNumber, requestCode, verifyCode } from '../_lib/auth'
+import { AuthError, authCapabilities, googleCallback, googleStart, googleIdentityStart, googleIdentityVerify, phoneNumber, requestCode, verificationStatus, verifyCode } from '../_lib/auth'
 import { schemaReady, schemaFailure } from '../_lib/schema'
 
 type Row = Record<string, unknown>
@@ -51,7 +51,10 @@ async function login(request: Request, db: Database) {
 
 async function customerAccount(db:Database,user:User) {
   const [profile,requests,googleIdentity] = await Promise.all([
-    db.prepare('SELECT phone,email_verified,phone_verified,updated_at FROM customer_profiles WHERE user_id=?').bind(user.id).first<Row>(),
+    db.prepare(`SELECT p.phone,p.email_verified,p.updated_at,
+      (p.phone_verified=1 AND EXISTS(SELECT 1 FROM auth_identities a WHERE a.user_id=p.user_id
+        AND a.provider='sms_code' AND a.provider_subject=p.phone)) AS phone_verified
+      FROM customer_profiles p WHERE p.user_id=?`).bind(user.id).first<Row>(),
     customerRequests(db,user.id),
     db.prepare("SELECT id FROM auth_identities WHERE user_id=? AND provider='google' LIMIT 1").bind(user.id).first<Row>(),
   ])
@@ -251,6 +254,7 @@ export async function onRequest(context: Context): Promise<Response> {
       return json({ok:true},200,{'set-cookie':`madarom_session=; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=0`})
     }
     if (!user) return error('יש להתחבר למערכת',401)
+    if (path === '/auth/status' && method === 'GET') return json(await verificationStatus(db,user))
     if (path === '/notifications' && method === 'GET') return await notificationResponse(db,user)
     if (path === '/notifications/read-all' && method === 'PATCH') return await markAllNotificationsRead(db,user)
     const notificationId=/^\/notifications\/([\w-]+)$/.exec(path)?.[1]
