@@ -1,0 +1,14 @@
+{
+  "watch": [
+    "server"
+  ],
+  "ext": "js,mjs,cjs",
+  "ignore": [
+    "*.db.json",
+    "**/*.db.json",
+    "node_modules",
+    "my-app",
+    "dist"
+  ],
+  "delay": 300
+}
