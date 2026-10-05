@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { deploymentConfig, validateDatabaseOwnership } from '../scripts/deploy.mjs'
+import { deploy, deploymentConfig, validateDatabaseOwnership } from '../scripts/deploy.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { readFileSync, readdirSync } from 'node:fs'
 
@@ -31,4 +31,9 @@ test('deployment checks the same config for all CLI forms and refuses environmen
   assert.equal(deploymentConfig(['--dry-run']),'wrangler.jsonc')
   for(const args of [['--env','prod'],['--env=prod'],['-eprod'],['--cwd','other'],['--config'],['--config='],['--config','a','--config=b']])
     assert.throws(()=>deploymentConfig(args))
+})
+
+test('inactive reference refuses deployment before opening a config or running Wrangler',()=>{
+  for(const args of [[],['--config','missing-production.jsonc'],['--dry-run']])
+    assert.throws(()=>deploy(args),/inactive reference version/)
 })

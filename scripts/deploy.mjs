@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
@@ -52,6 +52,8 @@ export function deploymentConfig(args) {
   return configPath||'wrangler.jsonc'
 }
 export function deploy(args=process.argv.slice(2)) {
+  if(existsSync(fileURLToPath(new URL('../reference/version.json',import.meta.url))))
+    throw new Error('This is an inactive reference version. Production deployment and remote migrations are disabled.')
   const configPath=deploymentConfig(args)
   const parsed=ts.parseConfigFileTextToJson(configPath,readFileSync(configPath,'utf8'))
   if(parsed.error)throw new Error('Invalid Wrangler configuration')
