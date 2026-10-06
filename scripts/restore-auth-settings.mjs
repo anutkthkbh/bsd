@@ -8,7 +8,7 @@ import ts from 'typescript'
 const root=fileURLToPath(new URL('../',import.meta.url))
 const smsUrl='https://flash-sms.shmuelilani14789.workers.dev'
 
-export function authSettings(source,{mailFrom}={}) {
+export function authSettings(source,{mailFrom,allowResendTestDomain=false}={}) {
   const env=typeof source==='string'?parseEnv(source.replace(/^\uFEFF/,'')):source
   const settings={},warnings=[]
   if(env.SMS_WORKER_SECRET?.trim()) {
@@ -23,24 +23,29 @@ export function authSettings(source,{mailFrom}={}) {
     const from=(mailFrom||env.EMAIL_FROM||env.MAIL_FROM||'').trim()
     const address=from.match(/<([^<>\s]+)>$/)?.[1]||from
     if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))warnings.push('Resend sender is missing; email settings were omitted.')
-    else if(/@(?:resend\.dev|example\.(?:com|org|net))$/i.test(address))
-      warnings.push('The old Resend sender is restricted to testing; supply a verified sender with --mail-from.')
+    else if(/@example\.(?:com|org|net)$/i.test(address))
+      warnings.push('The sender is a placeholder; email settings were omitted.')
+    else if(/@resend\.dev$/i.test(address)&&!allowResendTestDomain)
+      warnings.push('The Resend sender is restricted; use --mail-from with a verified sender, or --allow-resend-test-domain for temporary account-owner delivery.')
     else {settings.RESEND_API_KEY=env.RESEND_API_KEY;settings.EMAIL_FROM=from;settings.MAIL_FROM=from}
+    if(settings.RESEND_API_KEY&&/@resend\.dev$/i.test(address))
+      warnings.push('Temporary resend.dev sender: Resend only permits delivery to its account owner. Other recipients are rejected before delivery, not sent to spam. Recipient overrides are not restored.')
   }
   return {settings,warnings}
 }
 
 export function restore(args=process.argv.slice(2),run=spawnSync) {
-  const sources=[];let apply=false,mailFrom
+  const sources=[];let apply=false,mailFrom,allowResendTestDomain=false
   for(let i=0;i<args.length;i++) {
     if(args[i]==='--source'&&args[i+1])sources.push(args[++i])
     else if(args[i]==='--mail-from'&&args[i+1])mailFrom=args[++i]
+    else if(args[i]==='--allow-resend-test-domain')allowResendTestDomain=true
     else if(args[i]==='--apply')apply=true
-    else throw new Error('Use --source path [--source path] [--mail-from verified-sender] [--apply].')
+    else throw new Error('Use --source path [--source path] [--mail-from verified-sender] [--allow-resend-test-domain] [--apply].')
   }
   if(!sources.length)throw new Error('Provide a local copy of the original provider environment file with --source.')
   const source=Object.assign({},...sources.map(path=>parseEnv(readFileSync(path,'utf8').replace(/^\uFEFF/,''))))
-  const {settings,warnings}=authSettings(source,{mailFrom})
+  const {settings,warnings}=authSettings(source,{mailFrom,allowResendTestDomain})
   const keys=Object.keys(settings)
   for(const warning of warnings)console.log(warning)
   if(!keys.length)throw new Error('No eligible provider settings were found.')
